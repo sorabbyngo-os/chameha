@@ -1,40 +1,21 @@
 # Chameha
-> **AI Personality and Interface Layer** — by Sorabbyngo Labs · *Rhythm of Digital Life*
+> **AI Personality and Interface Engine** — Sorabbyngo Labs
 
-## What is Chameha?
-Chameha is the face of SORABBYNGO OS — the AI personality layer that users interact with directly. Warm, intelligent, context-aware. Supports English and Swahili. Inspired by the vision of AI as a calm helpful presence.
+The face of SORABBYNGO OS. Voice-first from boot. Warm, intelligent, bilingual English/Swahili. Inspired by the vision of AI as a calm, present companion.
 
-## Stack
-| Component | Detail |
-|---|---|
-| **Bilingual** | English and Swahili natively |
-| **Voice interface** | Flite TTS + ElevenLabs production voice |
-| **Boot experience** | Custom TTY splash and welcome sequence |
-| **Chameha-ByngoX protocol** | Defined interface to the swarm engine |
+> Welcome, Charles. This is Sorabbyngo.
 
-## Status
-🔵 In development
+## Components
+| Component | Technology | Status |
+|---|---|---|
+| UI Framework | Flutter cross-platform | In development |
+| Speech-to-Text | Whisper.cpp on-device | In development |
+| Text-to-Speech | Coqui TTS + ElevenLabs | In development |
+| Dialogue Manager | ACP protocol over NATS | In development |
+| Boot experience | Wayland compositor | In development |
+| Languages | English + Swahili | Designed |
 
-## Part of SORABBYNGO OS
-```
-┌─────────────────────────────────────────────────┐
-│              SORABBYNGO AI OS                   │
-├─────────────────────────────────────────────────┤
-│  Chameha        — AI personality and interface  │
-├─────────────────────────────────────────────────┤
-│  Novela         — AI health intelligence        │
-├─────────────────────────────────────────────────┤
-│  Byngox         — Swarm reasoning engine        │
-├─────────────────────────────────────────────────┤
-│  CML            — Cognitive mediation layer     │
-├─────────────────────────────────────────────────┤
-│  Byngonet       — Distributed mesh network      │
-├─────────────────────────────────────────────────┤
-│  SORABBYNGO OS  — Custom Linux 6.19.10 kernel   │
-└─────────────────────────────────────────────────┘
-```
+## Boot Target
+< 10 seconds from power-on to Welcome on Tier 2 hardware.
 
-## About
-**Sorabbyngo Company** — Kisii, Kenya
-*Building Africa sovereign digital infrastructure — from the kernel up.*
-© 2026 Sorabbyngo Company. All rights reserved.
+**Sorabbyngo Company** — Kisii, Kenya | 2026
