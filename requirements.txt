@@ -1,4 +1,5 @@
-anthropic==0.34.2
+# Chameha runtime dependencies
+# anthropic SDK intentionally excluded — API called via urllib per ADR-009
+# nats-py intentionally excluded — raw socket NATS used for zero-dependency boot
 fastapi==0.111.0
 uvicorn==0.30.0
-nats-py==2.6.0

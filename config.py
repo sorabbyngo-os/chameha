@@ -7,7 +7,12 @@ import json
 import os
 from identity import DeviceIdentity
 
-CONFIG_DIR = "/opt/sorabbyngo/chameha"
+CONFIG_DIR  = os.environ.get(
+    "CHAMEHA_CONFIG_DIR",
+    "/opt/sorabbyngo/chameha"
+    if os.path.exists("/opt/sorabbyngo")
+    else os.path.expanduser("~/.sorabbyngo/chameha")
+)
 CONFIG_FILE = os.path.join(CONFIG_DIR, "user.json")
 
 class UserConfig:
@@ -19,7 +24,6 @@ class UserConfig:
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
-                # Verify config belongs to this device
                 if data.get("node_id") != self.identity.node_id:
                     return self._default()
                 return data
