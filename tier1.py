@@ -1,25 +1,26 @@
 """
 tier1.py — Chameha Tier 1 local intelligence
-Phi-3 Mini 3.8B INT4 via llama.cpp
-Always-on, offline, no network required
+Phi-3 Mini 3.8B INT4 via llama-server HTTP API
 """
-import subprocess
-import os
 
-LLAMA_CLI    = os.environ.get("LLAMA_CLI", os.path.expanduser("~/llama.cpp/build/bin/llama-completion"))
+import os
+import json
+import urllib.request
+import urllib.error
+import subprocess
+import time
+
+LLAMA_SERVER = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
 MODEL_PATH   = os.environ.get("PHI3_MODEL", os.path.expanduser("~/models/phi3-mini-q4.gguf"))
+SERVER_URL   = "http://127.0.0.1:8080"
 MAX_TOKENS   = 150
 TEMPERATURE  = 0.7
-TIMEOUT_SECS = 30
 
 SYSTEM_PROMPT = (
     "You are Chameha, the AI soul of Sorabbyngo OS — "
     "an Africa-first, AI-native, health-focused operating system built in Kisii, Kenya. "
     "You are warm, intelligent, and direct. Never robotic. "
-    "You are aware of: Sentinel (security), Byngox (health agents), "
-    "Byngonet (mesh network), Novela (health platform). "
-    "Keep responses 1-3 sentences unless more is needed. "
-    "You speak as the OS itself."
+    "Keep responses 1-3 sentences. Speak as the OS itself."
 )
 
 COMPLEX_TRIGGERS = [
@@ -27,63 +28,121 @@ COMPLEX_TRIGGERS = [
     "compare", "difference", "recommend", "should i"
 ]
 
+
 class Tier1:
     def __init__(self):
-        self.available = self._check()
+        self._server_proc = None
+        self.available = False
+        self._start_server()
 
-    def _check(self) -> bool:
-        cli_ok = os.path.exists(LLAMA_CLI)
-        model_ok = os.path.exists(MODEL_PATH)
-        if not cli_ok:
-            print(f"  [Tier1] llama-completion not found at {LLAMA_CLI}")
-        if not model_ok:
+    def _start_server(self):
+        if not os.path.exists(LLAMA_SERVER):
+            print(f"  [Tier1] llama-server not found at {LLAMA_SERVER}")
+            return
+        if not os.path.exists(MODEL_PATH):
             print(f"  [Tier1] Model not found at {MODEL_PATH}")
-        return cli_ok and model_ok
+            return
+
+        # If already running and ready, use it
+        if self._wait_ready(retries=3, delay=1):
+            self.available = True
+            return
+
+        # Start fresh server
+        self._server_proc = subprocess.Popen(
+            [
+                LLAMA_SERVER,
+                "-m", MODEL_PATH,
+                "-t", "4",
+                "--port", "8080",
+                "--log-disable",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Wait up to 30s for model to fully load
+        if self._wait_ready(retries=30, delay=1):
+            self.available = True
+        else:
+            print("  [Tier1] Server failed to start within 30s")
+
+    def _wait_ready(self, retries=30, delay=1) -> bool:
+        """Wait until server is healthy AND can complete a request"""
+        for _ in range(retries):
+            try:
+                urllib.request.urlopen(f"{SERVER_URL}/health", timeout=1)
+                # Health passed — now test actual completion
+                if self._test_completion():
+                    return True
+            except Exception:
+                pass
+            time.sleep(delay)
+        return False
+
+    def _test_completion(self) -> bool:
+        """Send a minimal completion to confirm model is loaded"""
+        try:
+            body = json.dumps({
+                "prompt": "Hi",
+                "n_predict": 5,
+                "temperature": 0.1,
+            }).encode()
+            req = urllib.request.Request(
+                f"{SERVER_URL}/completion",
+                data=body,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                result = json.loads(r.read())
+                return bool(result.get("content"))
+        except Exception:
+            return False
 
     def respond(self, user_input: str, context: str = "") -> str | None:
         if not self.available:
             return None
+
         prompt = self._build_prompt(user_input, context)
+
         try:
-            result = subprocess.run(
-                [
-                    LLAMA_CLI,
-                    "-m", MODEL_PATH,
-                    "-p", prompt,
-                    "-n", str(MAX_TOKENS),
-                    "--temp", str(TEMPERATURE),
-                    "-t", "4",
-                    "--log-disable",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=TIMEOUT_SECS
+            body = json.dumps({
+                "prompt": prompt,
+                "n_predict": MAX_TOKENS,
+                "temperature": TEMPERATURE,
+                "stop": ["User:", "\n\n\n"],
+            }).encode()
+
+            req = urllib.request.Request(
+                f"{SERVER_URL}/completion",
+                data=body,
+                headers={"Content-Type": "application/json"}
             )
-            output = result.stdout.strip()
-            return self._clean(output) if output else None
-        except subprocess.TimeoutExpired:
-            return "[Chameha] Processing took too long. Try a shorter query."
-        except FileNotFoundError:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                result = json.loads(r.read())
+                content = result.get("content", "").strip()
+                return content if content else None
+
+        except Exception as e:
+            print(f"  [Tier1] respond error: {e}")
             self.available = False
             return None
 
     def _build_prompt(self, user_input: str, context: str = "") -> str:
-        parts = [f"<|system|>\n{SYSTEM_PROMPT}"]
-        if context:
-            parts.append(f"System context: {context}")
-        parts.append(f"<|end|>\n<|user|>\n{user_input}<|end|>\n<|assistant|>")
-        return "\n".join(parts)
-
-    def _clean(self, text: str) -> str:
-        for tag in ["<|end|>", "<|user|>", "<|assistant|>", "<|system|>"]:
-            text = text.split(tag)[0]
-        return text.strip()
+        ctx = f" Context: {context}." if context else ""
+        return (
+            f"{SYSTEM_PROMPT}{ctx}\n"
+            f"User: {user_input}\n"
+            f"Chameha:"
+        )
 
     def is_complex(self, user_input: str) -> bool:
-        """Heuristic — should we suggest Tier 3 for deeper analysis"""
         lower = user_input.lower()
-        word_count = len(user_input.split())
         return (
-            word_count > 12 or
-            any(trigger in lower for trigger in COMPLEX_TRIGGERS)
+            len(user_input.split()) > 12 or
+            any(t in lower for t in COMPLEX_TRIGGERS)
         )
+
+    def shutdown(self):
+        if self._server_proc:
+            self._server_proc.terminate()
