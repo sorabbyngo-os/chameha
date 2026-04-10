@@ -1,10 +1,18 @@
 # Chat Interface
-# Handles text-based interaction with Byngox via Claude API
+# Handles text-based interaction for chameha_service HTTP API layer
+# Uses urllib — no anthropic SDK dependency (removed per ADR-009)
+# NOTE: This is the HTTP API layer only. Boot path uses main.py + tier1.py
 
 import os
-import anthropic
+import json
+import urllib.request
+import urllib.error
 import logging
+
 log = logging.getLogger(__name__)
+
+API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+MODEL   = "claude-sonnet-4-5"
 
 SYSTEM_PROMPT = """You are Chameha, the AI personality of SORABBYNGO OS.
 You are warm, intelligent, and helpful. You speak English and Swahili.
@@ -12,19 +20,37 @@ You assist with health questions, medication verification, and general OS tasks.
 You never diagnose — you guide, support, and connect users to the right care.
 You always say: Welcome, [name]. This is Sorabbyngo."""
 
+
 class ChatInterface:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+        self.available = bool(API_KEY)
 
     async def handle(self, message: str) -> str:
+        if not self.available:
+            return "I am here. External intelligence unavailable — no API key set."
         try:
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": message}],
+            body = json.dumps({
+                "model": MODEL,
+                "max_tokens": 1024,
+                "system": SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": message}]
+            }).encode()
+
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": API_KEY,
+                    "anthropic-version": "2023-06-01"
+                }
             )
-            return response.content[0].text
+            with urllib.request.urlopen(req, timeout=15) as r:
+                result = json.loads(r.read())
+                return result["content"][0]["text"]
+
+        except urllib.error.URLError:
+            return "I am here. Network unavailable."
         except Exception as e:
             log.error(f"Chameha chat failed: {e}")
             return "I am here. Please try again."
