@@ -13,7 +13,7 @@ from event_bus import EventBus, ChamehaEvent, EventType, Severity
 # NATS subject → (source, event_type, severity) mapping
 SUBJECT_MAP = {
     "sorabbyngo.sentinel.threat":    ("sentinel.core",  EventType.LOCK,   Severity.CRITICAL),
-    "sorabbyngo.sentinel.contained": ("sentinel.blue",  EventType.NOTIFY, Severity.HIGH),
+    "sorabbyngo.sentinel.contained": ("sentinel.blue",  EventType.NOTIFY, Severity.LOW),
     "sorabbyngo.sentinel.learned":   ("sentinel.brain", EventType.NOTIFY, Severity.LOW),
     "sorabbyngo.byngox.risk":        ("byngox.health",  EventType.NOTIFY, Severity.HIGH),
     "sorabbyngo.byngox.update":      ("byngox.agent",   EventType.NOTIFY, Severity.LOW),

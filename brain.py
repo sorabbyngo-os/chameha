@@ -84,10 +84,13 @@ class Brain:
             self._surface(self._format_for_user(event), event)
 
     def _route_notify(self, event: ChamehaEvent):
-        """NOTIFY — only surface HIGH and CRITICAL, swallow the rest"""
-        if event.should_surface():
+        """NOTIFY — only surface CRITICAL to user, audit everything else"""
+        if event.severity == Severity.CRITICAL:
             self._surface(self._format_for_user(event), event)
-        # LOW and MEDIUM are already audited, nothing more to do
+        elif event.severity == Severity.HIGH:
+            # HIGH events logged silently — user sees summary only
+            pass
+        # LOW and MEDIUM audited only, never surfaced
 
     # ------------------------------------------------------------------
     # Formatting
