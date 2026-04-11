@@ -136,14 +136,14 @@ class Brain:
 
     def _is_duplicate(self, event: ChamehaEvent) -> bool:
         with self._lock:
-            last = self._last_seen.get(event.source)
+            last = self._last_seen.get(event.source + event.message[:30])
             if last is None:
                 return False
             return (event.timestamp - last) < DEDUP_WINDOW
 
     def _record_seen(self, event: ChamehaEvent):
         with self._lock:
-            self._last_seen[event.source] = event.timestamp
+            self._last_seen[event.source + event.message[:30]] = event.timestamp
 
     # ------------------------------------------------------------------
     # Surface to UI
