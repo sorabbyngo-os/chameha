@@ -108,7 +108,7 @@ def conversation_loop(config: UserConfig, brain: Brain, conv: Conversation):
         if user_input.lower() == "status":
             tier_status = conv.status()
             print("")
-            print(f"  NodeID    : {config.data.get('node_id', 'unknown')[:16]}...")
+            print(f"  NodeID    : {str(config.data.get('node_id') or 'unknown')[:16]}...")
             print(f"  Kernel    : {os.uname().release}")
             print(f"  Boot #    : {config.boots}")
             print(f"  Tier 1    : {tier_status['tier1']}")
