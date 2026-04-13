@@ -112,6 +112,7 @@ def conversation_loop(config: UserConfig, brain: Brain, conv: Conversation):
             print(f"  Kernel    : {os.uname().release}")
             print(f"  Boot #    : {config.boots}")
             print(f"  Tier 1    : {tier_status['tier1']}")
+            print(f"  Tier 2    : {tier_status['tier2']}")
             print(f"  Tier 3    : {tier_status['tier3']} (explicit /cloud only)")
             print(f"  NATS      : sorabbyngo.* subscribed")
             print(f"  Sentinel  : active")
