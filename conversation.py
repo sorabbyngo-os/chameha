@@ -5,6 +5,7 @@ ADR-009 enforced: Tier 1 default, Tier 3 explicit /cloud only
 import datetime
 import os
 from tier1 import Tier1
+from tier2 import Tier2
 from tier3 import Tier3
 
 LOG_PATH = os.path.expanduser("~/sorabbyngo-os/chameha/chameha.log")
@@ -21,6 +22,7 @@ def _log(entry: str):
 class Conversation:
     def __init__(self):
         self.tier1 = Tier1()
+        self.tier2 = Tier2()
         self.tier3 = Tier3()
 
     def respond(self, user_input: str) -> str:
@@ -39,19 +41,33 @@ class Conversation:
         if user_input == "/cloud":
             return "Usage: /cloud <your question>"
 
+        # Tier 2 — for complex queries when available
+        if self.tier2.available and self.tier2.is_complex(user_input):
+            _log(f"TIER2_QUERY: {user_input[:80]}")
+            response = self.tier2.respond(user_input)
+            if response:
+                _log(f"TIER2_RESPONSE: {response[:80]}")
+                return response
+            _log("TIER2_MISS — falling back to Tier 1")
+
         # Tier 1 — default, always offline
         _log(f"TIER1_QUERY: {user_input[:80]}")
         response = self.tier1.respond(user_input)
 
         if response:
             _log(f"TIER1_RESPONSE: {response[:80]}")
-            # Suggest Tier 3 for complex queries — never auto-call
-            if self.tier1.is_complex(user_input):
+            if self.tier1.is_complex(user_input) and not self.tier2.available:
                 response += "\n\n  [Deeper analysis available — /cloud " + user_input[:30] + "...]"
             return response
 
-        # Tier 1 unavailable
-        _log("TIER1_UNAVAILABLE")
+        # Tier 1 unavailable — try Tier 2 as fallback
+        if self.tier2.available:
+            _log("TIER1_UNAVAILABLE — trying Tier 2")
+            response = self.tier2.respond(user_input)
+            if response:
+                return response
+
+        _log("ALL_LOCAL_UNAVAILABLE")
         return (
             "[Local model unavailable]\n"
             "  Use /cloud <query> for external intelligence."
@@ -60,5 +76,6 @@ class Conversation:
     def status(self) -> dict:
         return {
             "tier1": "active" if self.tier1.available else "unavailable",
+            "tier2": self.tier2.status(),
             "tier3": "active" if self.tier3.available else "no API key",
         }
