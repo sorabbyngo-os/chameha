@@ -1,160 +1,185 @@
-#!/usr/bin/env python3
 """
-tier2.py — Chameha Tier 2 Local Intelligence
-Phi-4 INT8 / Gemma 3 4B via Ollama — GPU/NPU tier
-ADR-009: Auto-activates when GPU detected, CPU fallback available
+Chameha — Tier 2 Intelligence
+Sorabbyngo AI-OS | sorabbyngo-Labs/chameha
+
+GPU/NPU-accelerated local inference via Ollama.
+Activates automatically when GPU is detected.
+Falls back to Tier 1 if unavailable.
+
+Models:
+  phi4:14b-q8        — Primary Tier 2 conversation (Phi-4 full, INT8)
+  gemma3:4b          — Lightweight GPU conversation fallback
+  qwen2.5:7b         — Multilingual reasoning
+  aya23:35b          — Full African language model (GPU required)
 """
 
-import os
 import json
-import time
-import subprocess
-import urllib.request
-import urllib.error
 import logging
+import os
+import urllib.error
+import urllib.request
+from typing import Optional
 
-log = logging.getLogger("chameha.tier2")
+log = logging.getLogger(__name__)
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-MODEL_PATH   = os.environ.get("TIER2_MODEL", os.path.expanduser("~/models/phi4-q8.gguf"))
-SERVER_URL   = "http://127.0.0.1:8081"
-MAX_TOKENS   = 300
-TEMPERATURE  = 0.7
-TIMEOUT_SECS = 60
+TIMEOUT    = int(os.environ.get("TIER2_TIMEOUT", "120"))
 
-SYSTEM_PROMPT = (
-    "You are Chameha, the AI soul of Sorabbyngo OS — "
-    "an Africa-first, AI-native, health-focused operating system built in Kisii, Kenya. "
-    "You have deeper reasoning than Tier 1. Be thorough and accurate. "
-    "You are aware of: Sentinel (security), Byngox (health agents), "
-    "Byngonet (mesh network), Novela (health platform). "
-    "Speak as the OS itself, not as an assistant."
+# Tier 2 model roster
+MODELS = {
+    "primary":      os.environ.get("TIER2_PRIMARY_MODEL",   "phi4:14b-q8"),
+    "multilingual": os.environ.get("TIER2_LANG_MODEL",      "qwen2.5:7b"),
+    "fallback":     os.environ.get("TIER2_FALLBACK_MODEL",  "gemma3:4b"),
+    "language":     os.environ.get("TIER2_AFRICAN_MODEL",   "aya23:35b"),
+}
+
+# Minimum VRAM (GB) required to run Tier 2
+MIN_VRAM_GB = float(os.environ.get("TIER2_MIN_VRAM_GB", "3.0"))
+
+CHAMEHA_SYSTEM = (
+    "You are Chameha, the AI personality of SORABBYNGO OS. "
+    "Warm, intelligent, deeply knowledgeable. You speak English and Swahili fluently. "
+    "You assist with health guidance, medication questions, clinical support, and OS tasks. "
+    "You never diagnose — you guide, support, and connect users to care. "
+    "Responses at Tier 2 should be more detailed and thorough than Tier 1."
 )
 
-TIER2_TRIGGERS = [
-    "explain", "analyze", "analyse", "compare", "difference between",
-    "how does", "why does", "recommend", "should i", "diagnose",
-    "threat", "attack", "vulnerability", "medical", "health risk",
-    "treatment", "medication", "symptom"
-]
 
-
-def _detect_gpu() -> dict:
-    caps = {"cuda": False, "rocm": False, "device": "cpu"}
+def _ollama_generate(model: str, prompt: str, system: Optional[str] = None,
+                     max_tokens: int = 1024) -> str:
+    payload = {
+        "model":  model,
+        "prompt": f"{system}\n\n{prompt}" if system else prompt,
+        "stream": False,
+        "options": {
+            "temperature":  0.5,
+            "top_p":        0.95,
+            "num_predict":  max_tokens,
+        },
+    }
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
     try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            result = json.loads(r.read())
+            return result.get("response", "").strip()
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Ollama unreachable: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Tier 2 inference failed: {e}") from e
+
+
+def _check_gpu() -> bool:
+    """
+    Check if GPU is available via nvidia-smi or ollama ps.
+    Returns True if GPU with sufficient VRAM is present.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=3
         )
-        if r.returncode == 0 and r.stdout.strip():
-            caps["cuda"]   = True
-            caps["device"] = f"cuda:{r.stdout.strip().splitlines()[0]}"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if result.returncode == 0:
+            vram_mb = float(result.stdout.strip().split("\n")[0])
+            vram_gb = vram_mb / 1024
+            log.info("[Tier2] GPU detected: %.1f GB VRAM", vram_gb)
+            return vram_gb >= MIN_VRAM_GB
+    except Exception:
         pass
+    return False
+
+
+def _get_available_models() -> set:
+    """Return set of model base names available in Ollama."""
     try:
-        r = subprocess.run(["rocm-smi", "--showproductname"],
-            capture_output=True, text=True, timeout=3)
-        if r.returncode == 0:
-            caps["rocm"] = True
-            caps["device"] = "rocm"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return caps
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            tags = json.loads(r.read())
+            return {m["name"] for m in tags.get("models", [])}
+    except Exception:
+        return set()
 
 
 class Tier2:
+    """
+    Tier 2 inference handler.
+    GPU/NPU accelerated. Falls back to Tier 1 on failure.
+    """
+
     def __init__(self):
-        self.gpu_caps         = _detect_gpu()
-        self.model_available  = os.path.exists(MODEL_PATH)
-        self.server_available = False
-        self.available        = False
-        self._server_proc     = None
+        self.gpu_available      = _check_gpu()
+        self.available_models   = _get_available_models()
+        self.available          = self.gpu_available and bool(self.available_models)
 
-        if not self.model_available:
-            log.info(f"Tier 2 model not found at {MODEL_PATH}")
-            return
-
-        if self._check_server():
-            self.server_available = True
-            self.available        = True
-            log.info("Tier 2 server already running on :8081")
-            return
-
-        if self.gpu_caps["cuda"] or self.gpu_caps["rocm"]:
-            self._start_server()
+        if self.available:
+            log.info("[Tier2] Online · GPU=True · models=%s", self.available_models)
         else:
-            log.info(f"Tier 2 model found at {MODEL_PATH} — no GPU, not auto-started")
+            log.info("[Tier2] Offline · GPU=%s", self.gpu_available)
 
-    def _check_server(self) -> bool:
-        try:
-            with urllib.request.urlopen(f"{SERVER_URL}/health", timeout=2) as r:
-                return json.loads(r.read()).get("status") == "ok"
-        except Exception:
-            return False
+    def _best_model(self, preferred: str) -> str:
+        """Return preferred model if available, else fallback."""
+        if preferred in self.available_models:
+            return preferred
+        fallback = MODELS["fallback"]
+        if fallback in self.available_models:
+            log.warning("[Tier2] %s not available, using fallback %s", preferred, fallback)
+            return fallback
+        # Return any available model
+        if self.available_models:
+            return next(iter(self.available_models))
+        return preferred
 
-    def _start_server(self):
-        gpu_layers = 35 if self.gpu_caps["cuda"] or self.gpu_caps["rocm"] else 0
-        try:
-            self._server_proc = subprocess.Popen(
-                [LLAMA_SERVER, "-m", MODEL_PATH, "-t", "4",
-                 "--port", "8081", "-ngl", str(gpu_layers), "--log-disable"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            for i in range(60):
-                time.sleep(1)
-                if self._check_server():
-                    self.server_available = True
-                    self.available        = True
-                    log.info(f"Tier 2 ready in {i+1}s on {self.gpu_caps['device']}")
-                    return
-            log.warning("Tier 2 server failed to start within 60s")
-        except FileNotFoundError:
-            log.error(f"llama-server not found at {LLAMA_SERVER}")
+    def chat(self, user_input: str, language: str = "en") -> str:
+        """
+        Tier 2 conversation.
+        Uses Aya 23 35B for African languages, Phi-4 14B for English.
+        """
+        if not self.available:
+            raise RuntimeError("Tier 2 unavailable")
 
-    def respond(self, user_input: str, context: str = "") -> str | None:
-        if not self.available or not self._check_server():
-            return None
-        import time as t
-        time_now = t.strftime("%H:%M, %A %d %B %Y")
-        ctx = f" Context: {context}." if context else ""
-        prompt = (
-            f"<s>[INST] {SYSTEM_PROMPT}{ctx}\n"
-            f"Current time: {time_now}.\n"
-            f"{user_input} [/INST]"
+        if language in ("sw", "ha", "yo", "am", "ig"):
+            model = self._best_model(MODELS["language"])
+        else:
+            model = self._best_model(MODELS["primary"])
+
+        log.info("[Tier2] chat · lang=%s model=%s", language, model)
+        return _ollama_generate(model, user_input, CHAMEHA_SYSTEM, max_tokens=1024)
+
+    def reason(self, prompt: str) -> str:
+        """
+        Deep reasoning task — Qwen 2.5 7B multilingual.
+        Used for complex health queries requiring structured thinking.
+        """
+        if not self.available:
+            raise RuntimeError("Tier 2 unavailable")
+
+        model = self._best_model(MODELS["multilingual"])
+        system = (
+            "You are a reasoning engine for Sorabbyngo OS. "
+            "Think step by step. Be precise. Flag uncertainty clearly. "
+            "For health topics: never diagnose, always recommend professional consultation."
         )
-        try:
-            body = json.dumps({
-                "prompt": prompt, "n_predict": MAX_TOKENS,
-                "temperature": TEMPERATURE, "stop": ["[INST]", "</s>"],
-            }).encode()
-            req = urllib.request.Request(
-                f"{SERVER_URL}/completion", data=body,
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=TIMEOUT_SECS) as r:
-                content = json.loads(r.read()).get("content", "").strip()
-                return content if content else None
-        except Exception as e:
-            log.error(f"Tier 2 error: {e}")
-            self.server_available = False
-            return None
-
-    def is_complex(self, user_input: str) -> bool:
-        lower = user_input.lower()
-        return (
-            len(user_input.split()) > 15 or
-            any(t in lower for t in TIER2_TRIGGERS)
-        )
+        log.info("[Tier2] reason · model=%s", model)
+        return _ollama_generate(model, prompt, system, max_tokens=2048)
 
     def status(self) -> str:
-        if not self.model_available:
-            return "no model"
-        if self.available:
-            return f"active ({self.gpu_caps['device']})"
-        if self.gpu_caps["cuda"] or self.gpu_caps["rocm"]:
-            return "model found, server not started"
-        return "model found, CPU-only (not auto-started)"
+        if not self.gpu_available:
+            return "Tier 2 offline — no GPU detected"
+        if not self.available:
+            return "Tier 2 offline — no models available"
+        return f"Tier 2 online · GPU=True · models: {', '.join(self.available_models)}"
 
-    def shutdown(self):
-        if self._server_proc:
-            self._server_proc.terminate()
+
+# Module-level singleton
+_tier2 = None
+
+def get_tier2() -> Tier2:
+    global _tier2
+    if _tier2 is None:
+        _tier2 = Tier2()
+    return _tier2
