@@ -16,8 +16,8 @@ Chameha uses a tiered model stack — all inference is self-hosted or on-device.
 
 | Tier | Model | Runtime | Condition |
 |---|---|---|---|
-| Tier 1 | Phi-4 Mini | llama.cpp / Ollama | Always-on, 1GB RAM |
-| Tier 1 | SmolLM2 360M | llama.cpp | Device control tasks |
+| Tier 1 | Phi-4 Mini | Ollama | Always-on, 1GB RAM |
+| Tier 1 | SmolLM2 360M | Ollama | Device control tasks |
 | Tier 1–2 | Aya 23 | Ollama | African language routing (Swahili, Hausa, Yoruba, Amharic) |
 | Tier 2 | Phi-4 INT8 / Gemma 3 4B | Ollama | GPU/NPU devices, 3–4GB RAM |
 | Tier 4 | DeepSeek-R1 70B | Byngox Prime vLLM | Self-hosted cluster, opt-in only |

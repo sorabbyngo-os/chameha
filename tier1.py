@@ -10,8 +10,8 @@ import urllib.error
 import subprocess
 import time
 
-LLAMA_SERVER = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
-LLAMA_CLI    = os.environ.get("LLAMA_CLI", os.path.expanduser("~/llama.cpp/build/bin/llama-completion"))
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+# llama-cli removed — using Ollama HTTP API
 MODEL_PATH   = os.environ.get("PHI4_MODEL", os.path.expanduser("~/models/phi4-mini-q4.gguf"))
 SERVER_URL   = "http://127.0.0.1:8080"
 MAX_TOKENS   = 150

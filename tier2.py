@@ -15,7 +15,7 @@ import logging
 
 log = logging.getLogger("chameha.tier2")
 
-LLAMA_SERVER = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 MODEL_PATH   = os.environ.get("TIER2_MODEL", os.path.expanduser("~/models/phi4-q8.gguf"))
 SERVER_URL   = "http://127.0.0.1:8081"
 MAX_TOKENS   = 300
