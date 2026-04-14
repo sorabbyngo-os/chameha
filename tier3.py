@@ -5,6 +5,7 @@ ADR-009: no automatic calls, sanitized data only
 """
 import os
 import re
+import socket
 import json
 import urllib.request
 import urllib.error
@@ -33,11 +34,60 @@ class Tier3:
     def __init__(self):
         self.available = bool(API_KEY)
 
+    def _cml_filter(self, text: str) -> tuple[bool, str]:
+        """Send text through CML service before Claude API call"""
+        import uuid
+        try:
+            request_id = str(uuid.uuid4())[:8]
+            msg  = json.dumps({
+                "request_id": request_id,
+                "text":       text,
+                "component":  "chameha.tier3",
+                "action":     "tier3_call"
+            })
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            sock.connect(("127.0.0.1", 4222))
+            sock.recv(1024)
+            sock.sendall(b'CONNECT {"verbose":false}\r\n')
+            sub = f"SUB sorabbyngo.cml.filter.response.{request_id} 99\r\n"
+            sock.sendall(sub.encode())
+            pub = f"PUB sorabbyngo.cml.filter.request {len(msg)}\r\n{msg}\r\n"
+            sock.sendall(pub.encode())
+            # Read response
+            buf = ""
+            sock.settimeout(5)
+            for _ in range(20):
+                chunk = sock.recv(4096).decode("utf-8", errors="ignore")
+                buf += chunk
+                if "MSG sorabbyngo.cml.filter.response" in buf and "\r\n" in buf:
+                    lines = buf.split("\r\n")
+                    for i, line in enumerate(lines):
+                        if line.startswith("MSG ") and i+1 < len(lines):
+                            payload = lines[i+1]
+                            if payload:
+                                result = json.loads(payload)
+                                sock.close()
+                                if result.get("allowed"):
+                                    return True, result.get("text", text)
+                                else:
+                                    return False, result.get("reason", "Blocked by CML")
+            sock.close()
+        except Exception as e:
+            pass  # CML unavailable — fall through with original sanitization
+        return True, text
+
     def respond(self, user_input: str) -> str | None:
         if not self.available:
             return "[Tier 3 unavailable — set ANTHROPIC_API_KEY to enable]"
 
         sanitized = self._sanitize(user_input)
+
+        # CML filter — privacy + safety before Claude API
+        allowed, filtered = self._cml_filter(sanitized)
+        if not allowed:
+            return f"[CML blocked request: {filtered}]"
+        sanitized = filtered
 
         # ADR-009 — show sanitized query, require explicit confirmation
         print(f"\n  Sanitized query: {sanitized}")
