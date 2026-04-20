@@ -1,5 +1,6 @@
-# Chameha runtime dependencies
-# anthropic SDK intentionally excluded — API called via urllib per ADR-009
-# nats-py intentionally excluded — raw socket NATS used for zero-dependency boot
+# Chameha — AI Personality and Interface Engine
+# No external AI API SDKs. All inference via local Ollama or Byngox Prime vLLM.
+# Byngox Prime uses OpenAI-compatible REST API — called via urllib (no SDK needed).
+nats-py==2.6.0
 fastapi==0.111.0
 uvicorn==0.30.0
