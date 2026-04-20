@@ -46,9 +46,10 @@ class Tier3:
     def _check_available(self) -> bool:
         """Check if Byngox Prime cluster is reachable on internal network."""
         try:
-            host = BYNGOX_PRIME_URL.split("//")[1].split(":")[0]
-            port_str = BYNGOX_PRIME_URL.split(":")[2].split("/")[0]
-            port = int(port_str)
+            from urllib.parse import urlparse
+            parsed = urlparse(BYNGOX_PRIME_URL)
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
             s.connect((host, port))

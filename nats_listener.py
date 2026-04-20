@@ -89,15 +89,19 @@ class NatsListener:
             line, buf = buf.split("\r\n", 1)
             if line.startswith("MSG "):
                 parts = line.split()
-                if len(parts) >= 4:
+                # NATS MSG format: MSG <subject> <sid> [reply] <#bytes>
+                if len(parts) == 4:
                     subject  = parts[1]
                     byte_len = int(parts[3])
-                    if len(buf) >= byte_len:
-                        payload = buf[:byte_len]
-                        buf     = buf[byte_len:]
-                        if buf.startswith("\r\n"):
-                            buf = buf[2:]
-                        self._dispatch(subject, payload)
+                elif len(parts) == 5:
+                    subject  = parts[1]
+                    byte_len = int(parts[4])
+                else:
+                    continue
+                if len(buf) >= byte_len:
+                    payload = buf[:byte_len]
+                    buf     = buf[byte_len:].lstrip("\r\n")
+                    self._dispatch(subject, payload)
         return buf
 
     def _dispatch(self, subject: str, payload: str):

@@ -77,5 +77,5 @@ class Conversation:
         return {
             "tier1": "active" if self.tier1.available else "unavailable",
             "tier2": self.tier2.status(),
-            "tier3": "active" if self.tier3.available else "no API key",
+            "tier3": "active (Byngox Prime)" if self.tier3.available else "unavailable (Prime cluster unreachable)",
         }
