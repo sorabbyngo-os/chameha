@@ -1,6 +1,6 @@
 """
 tier1.py — Chameha Tier 1 local intelligence
-Phi-3 Mini 3.8B INT4 via llama-server HTTP API
+Phi-4 Mini via Ollama HTTP API
 """
 
 import os
@@ -12,7 +12,7 @@ import time
 
 LLAMA_SERVER = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
 LLAMA_CLI    = os.environ.get("LLAMA_CLI", os.path.expanduser("~/llama.cpp/build/bin/llama-completion"))
-MODEL_PATH   = os.environ.get("PHI3_MODEL", os.path.expanduser("~/models/phi3-mini-q4.gguf"))
+MODEL_PATH   = os.environ.get("PHI4_MODEL", os.path.expanduser("~/models/phi4-mini-q4.gguf"))
 SERVER_URL   = "http://127.0.0.1:8080"
 MAX_TOKENS   = 150
 TEMPERATURE  = 0.7

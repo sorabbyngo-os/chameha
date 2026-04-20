@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 tier2.py — Chameha Tier 2 Local Intelligence
-Mistral 7B Q4 via llama-server on port 8081
+Phi-4 INT8 / Gemma 3 4B via Ollama — GPU/NPU tier
 ADR-009: Auto-activates when GPU detected, CPU fallback available
 """
 
@@ -16,7 +16,7 @@ import logging
 log = logging.getLogger("chameha.tier2")
 
 LLAMA_SERVER = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
-MODEL_PATH   = os.environ.get("MISTRAL_MODEL", os.path.expanduser("~/models/mistral-7b-q4.gguf"))
+MODEL_PATH   = os.environ.get("TIER2_MODEL", os.path.expanduser("~/models/phi4-q8.gguf"))
 SERVER_URL   = "http://127.0.0.1:8081"
 MAX_TOKENS   = 300
 TEMPERATURE  = 0.7
