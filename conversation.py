@@ -42,7 +42,6 @@ class Conversation:
             return "Usage: /cloud <your question>"
 
         # Tier 2 — for complex queries when available
-        if self.tier2.available and self.tier2.is_complex(user_input):
             _log(f"TIER2_QUERY: {user_input[:80]}")
             response = self.tier2.respond(user_input)
             if response:
@@ -52,12 +51,10 @@ class Conversation:
 
         # Tier 1 — default, always offline
         _log(f"TIER1_QUERY: {user_input[:80]}")
-        response = self.tier1.respond(user_input)
+        response = self.tier1.chat(user_input)
 
         if response:
             _log(f"TIER1_RESPONSE: {response[:80]}")
-            if self.tier1.is_complex(user_input) and not self.tier2.available:
-                response += "\n\n  [Deeper analysis available — /cloud " + user_input[:30] + "...]"
             return response
 
         # Tier 1 unavailable — try Tier 2 as fallback
@@ -75,7 +72,7 @@ class Conversation:
 
     def status(self) -> dict:
         return {
-            "tier1": "active" if self.tier1.available else "unavailable",
+            "tier1": self.tier1.status(),
             "tier2": self.tier2.status(),
             "tier3": "active (Byngox Prime)" if self.tier3.available else "unavailable (Prime cluster unreachable)",
         }
