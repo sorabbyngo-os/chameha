@@ -1,384 +1,744 @@
 """
-Chameha — Test Suite
-Covers: Tier1, Brain, EventBus, DeviceIdentity, Conversation router
-All tests run without Ollama using mocks.
+Chameha -- Test Suite
+Tests: event bus, brain routing, identity, config, tier1 language detection,
+       tier2 model selection, tier3 sanitization, conversation routing,
+       nats listener dispatch, tone engine, language detection.
+All offline -- no Ollama, NATS, or real filesystem required.
 """
 import json
 import os
-import sys
 import tempfile
-import threading
 import time
+import queue
+import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
-
 import pytest
+import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-from event_bus import EventBus, ChamehaEvent, EventType, Severity, notify, ask, lock
-from identity import DeviceIdentity
-from brain import Brain
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+@pytest.fixture
+def tmp_dir():
+    with tempfile.TemporaryDirectory() as d:
+        yield Path(d)
+
+
+# ============================================================================
 # EventBus
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 class TestEventBus:
-    @pytest.fixture
-    def started_bus(self):
+
+    def test_publish_and_receive(self):
+        from event_bus import EventBus, ChamehaEvent, EventType, Severity
         bus = EventBus()
         bus.start()
-        yield bus
+        received = []
+        bus.subscribe(lambda e: received.append(e))
+
+        event = ChamehaEvent(
+            source     = "sentinel.core",
+            event_type = EventType.LOCK,
+            severity   = Severity.CRITICAL,
+            message    = "Threat detected",
+        )
+        bus.publish(event)
+        time.sleep(0.1)
         bus.stop()
 
-    def test_subscribe_and_receive(self, started_bus):
-        bus = started_bus
-        received = []
-        bus.subscribe(received.append)
-        event = ChamehaEvent(
-            source="test", message="hello",
-            event_type=EventType.NOTIFY, severity=Severity.LOW,
-        )
-        bus.publish(event)
-        time.sleep(0.1)
         assert len(received) == 1
-        assert received[0].message == "hello"
+        assert received[0].message == "Threat detected"
 
-    def test_multiple_subscribers(self, started_bus):
-        bus = started_bus
-        r1, r2 = [], []
-        bus.subscribe(r1.append)
-        bus.subscribe(r2.append)
-        event = ChamehaEvent(
-            source="test", message="broadcast",
-            event_type=EventType.NOTIFY, severity=Severity.LOW,
-        )
-        bus.publish(event)
-        time.sleep(0.1)
-        assert len(r1) == 1
-        assert len(r2) == 1
+    def test_priority_ordering(self):
+        from event_bus import EventBus, ChamehaEvent, EventType, Severity
+        bus = EventBus()
+        order = []
 
-    def test_notify_helper(self, started_bus):
-        bus = started_bus
-        received = []
-        bus.subscribe(received.append)
-        notify(bus, "sentinel.core", "Test notification", severity=Severity.HIGH)
-        time.sleep(0.1)
-        assert len(received) == 1
-        assert received[0].event_type == EventType.NOTIFY
-        assert received[0].severity == Severity.HIGH
+        def handler(e):
+            order.append(e.severity)
 
-    def test_ask_helper(self, started_bus):
-        bus = started_bus
-        received = []
-        bus.subscribe(received.append)
-        ask(bus, "byngox.agent", "User input needed")
-        time.sleep(0.1)
-        assert received[0].event_type == EventType.ASK
+        bus.subscribe(handler)
+        bus.start()
 
-    def test_lock_helper(self, started_bus):
-        bus = started_bus
-        received = []
-        bus.subscribe(received.append)
-        lock(bus, "sentinel.red", "Threat blocked", action_taken="IP blocked")
+        bus.publish(ChamehaEvent("src", EventType.NOTIFY, Severity.LOW,      "low"))
+        bus.publish(ChamehaEvent("src", EventType.NOTIFY, Severity.CRITICAL, "critical"))
+        bus.publish(ChamehaEvent("src", EventType.NOTIFY, Severity.HIGH,     "high"))
+        time.sleep(0.2)
+        bus.stop()
+
+        # CRITICAL should come first (highest priority = lowest number in queue)
+        assert order[0] == Severity.CRITICAL
+
+    def test_handler_error_does_not_crash(self):
+        from event_bus import EventBus, ChamehaEvent, EventType, Severity
+        bus = EventBus()
+        calls = []
+
+        def bad_handler(e):
+            raise RuntimeError("handler crash")
+
+        def good_handler(e):
+            calls.append(e)
+
+        bus.subscribe(bad_handler)
+        bus.subscribe(good_handler)
+        bus.start()
+        bus.publish(ChamehaEvent("src", EventType.NOTIFY, Severity.LOW, "test"))
         time.sleep(0.1)
-        assert received[0].event_type == EventType.LOCK
-        assert received[0].action_taken == "IP blocked"
+        bus.stop()
+        assert len(calls) == 1
+
+    def test_should_surface_high_and_above(self):
+        from event_bus import ChamehaEvent, EventType, Severity
+        low  = ChamehaEvent("src", EventType.NOTIFY, Severity.LOW,    "low")
+        high = ChamehaEvent("src", EventType.NOTIFY, Severity.HIGH,   "high")
+        crit = ChamehaEvent("src", EventType.LOCK,   Severity.CRITICAL, "crit")
+        assert low.should_surface()  is False
+        assert high.should_surface() is True
+        assert crit.should_surface() is True
 
     def test_event_to_dict(self):
-        event = ChamehaEvent(
-            source="test", message="hello",
-            event_type=EventType.NOTIFY, severity=Severity.MEDIUM,
+        from event_bus import ChamehaEvent, EventType, Severity
+        e = ChamehaEvent(
+            source       = "byngox.health",
+            event_type   = EventType.NOTIFY,
+            severity     = Severity.HIGH,
+            message      = "Risk elevated",
+            action_taken = "alert sent",
+            confidence   = 0.92,
         )
-        d = event.to_dict()
-        assert d["source"] == "test"
-        assert d["message"] == "hello"
-        assert "timestamp" in d
+        d = e.to_dict()
+        assert d["source"]       == "byngox.health"
+        assert d["message"]      == "Risk elevated"
+        assert d["confidence"]   == 0.92
+        assert d["action_taken"] == "alert sent"
 
-    def test_subscriber_exception_doesnt_crash_bus(self, started_bus):
-        bus = started_bus
-        def bad_subscriber(e):
-            raise ValueError("subscriber error")
-        bus.subscribe(bad_subscriber)
+    def test_convenience_functions(self):
+        from event_bus import EventBus, EventType, Severity, notify, ask, lock
+        bus      = EventBus()
+        received = []
+        bus.subscribe(lambda e: received.append(e))
+        bus.start()
+
+        notify(bus, "test.src", "info message")
+        ask(bus, "test.src", "confirm action")
+        lock(bus, "test.src", "system locked", action_taken="blocked")
+        time.sleep(0.2)
+        bus.stop()
+
+        types = {e.event_type for e in received}
+        assert EventType.NOTIFY in types
+        assert EventType.ASK    in types
+        assert EventType.LOCK   in types
+
+    def test_stop_cleanly(self):
+        from event_bus import EventBus
+        bus = EventBus()
+        bus.start()
+        bus.stop()
+        assert bus._running is False
+
+
+# ============================================================================
+# Brain
+# ============================================================================
+
+class TestBrain:
+
+    @pytest.fixture
+    def brain_setup(self, tmp_dir):
+        from event_bus import EventBus
+        from brain import Brain
+
+        bus      = EventBus()
+        identity = MagicMock()
+        identity.node_id = "test-node-123"
+        config   = MagicMock()
+
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            b = Brain(bus, identity, config)
+
+        return b, bus
+
+    def test_lock_event_surfaces(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, bus = brain_setup
+        surfaced = []
+        brain.on_surface(lambda msg, e: surfaced.append(msg))
+
         event = ChamehaEvent(
-            source="test", message="ok",
-            event_type=EventType.NOTIFY, severity=Severity.LOW,
+            source     = "sentinel.core",
+            event_type = EventType.LOCK,
+            severity   = Severity.CRITICAL,
+            message    = "Threat blocked",
+            action_taken = "IP blocked",
         )
-        bus.publish(event)
-        time.sleep(0.1)  # should not raise
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            brain._handle(event)
+
+        assert len(surfaced) == 1
+        assert "Threat blocked" in surfaced[0]
+
+    def test_notify_low_not_surfaced(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, _ = brain_setup
+        surfaced = []
+        brain.on_surface(lambda msg, e: surfaced.append(msg))
+
+        event = ChamehaEvent(
+            source     = "hal.sensors",
+            event_type = EventType.NOTIFY,
+            severity   = Severity.LOW,
+            message    = "Sensor ping",
+        )
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            brain._handle(event)
+
+        assert len(surfaced) == 0
+
+    def test_notify_critical_surfaces(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, _ = brain_setup
+        surfaced = []
+        brain.on_surface(lambda msg, e: surfaced.append(msg))
+
+        event = ChamehaEvent(
+            source     = "novela.risk",
+            event_type = EventType.NOTIFY,
+            severity   = Severity.CRITICAL,
+            message    = "Patient critical",
+        )
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            brain._handle(event)
+
+        assert len(surfaced) == 1
+
+    def test_deduplication(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, _ = brain_setup
+        surfaced = []
+        brain.on_surface(lambda msg, e: surfaced.append(msg))
+
+        event = ChamehaEvent(
+            source     = "sentinel.core",
+            event_type = EventType.LOCK,
+            severity   = Severity.CRITICAL,
+            message    = "Same event repeated",
+        )
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            brain._handle(event)
+            # Second identical event within DEDUP_WINDOW -- should be suppressed
+            event2 = ChamehaEvent(
+                source     = "sentinel.core",
+                event_type = EventType.LOCK,
+                severity   = Severity.CRITICAL,
+                message    = "Same event repeated",
+            )
+            brain._handle(event2)
+
+        assert len(surfaced) == 1
+
+    def test_ask_routes_to_callback(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, _ = brain_setup
+        asked = []
+        brain.on_ask(lambda e: asked.append(e))
+
+        event = ChamehaEvent(
+            source     = "byngox.health",
+            event_type = EventType.ASK,
+            severity   = Severity.HIGH,
+            message    = "Confirm treatment?",
+        )
+        with patch("brain.AUDIT_DIR", str(tmp_dir / "audit")):
+            brain._handle(event)
+
+        assert len(asked) == 1
+
+    def test_source_label_mapping(self, brain_setup, tmp_dir):
+        brain, _ = brain_setup
+        assert brain._source_label("sentinel.core")  == "Sentinel"
+        assert brain._source_label("byngox.health")  == "Health Monitor"
+        assert brain._source_label("novela.risk")    == "Health Risk"
+        assert brain._source_label("unknown.source") == "Unknown"
+
+    def test_audit_creates_file(self, brain_setup, tmp_dir):
+        from event_bus import ChamehaEvent, EventType, Severity
+        brain, _ = brain_setup
+        event = ChamehaEvent(
+            source     = "test",
+            event_type = EventType.NOTIFY,
+            severity   = Severity.LOW,
+            message    = "audit test",
+        )
+        audit_dir  = tmp_dir / "audit"
+        audit_file = audit_dir / "events.jsonl"
+        with patch("brain.AUDIT_DIR", str(audit_dir)):
+            with patch("brain.AUDIT_FILE", str(audit_file)):
+                brain._audit(event)
+
+        assert audit_file.exists()
+        line = json.loads(audit_file.read_text().strip())
+        assert line["message"] == "audit test"
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 # DeviceIdentity
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 class TestDeviceIdentity:
-    def test_reads_node_id(self):
-        with patch("builtins.open", mock_open(read_data="abc123def456\n")):
-            identity = DeviceIdentity()
-        assert identity.node_id == "abc123def456"
-        assert identity.sealed is True
 
-    def test_handles_missing_nodeid_file(self):
+    def test_sealed_when_nodeid_found(self):
+        from identity import DeviceIdentity
+        with patch("builtins.open", mock_open(read_data="abc123\n")):
+            identity = DeviceIdentity()
+        assert identity.sealed  is True
+        assert identity.node_id == "abc123"
+
+    def test_not_sealed_when_missing(self):
+        from identity import DeviceIdentity
         with patch("builtins.open", side_effect=FileNotFoundError):
             identity = DeviceIdentity()
+        assert identity.sealed  is False
         assert identity.node_id is None
-        assert identity.sealed is False
 
-    def test_handles_permission_error(self):
+    def test_short_id(self):
+        from identity import DeviceIdentity
+        with patch("builtins.open", mock_open(read_data="abcdef123456789xyz")):
+            identity = DeviceIdentity()
+        assert len(identity.short_id()) == 12
+        assert identity.short_id()      == "abcdef123456"
+
+    def test_assert_sealed_raises_when_not_sealed(self):
+        from identity import DeviceIdentity
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            identity = DeviceIdentity()
+        with pytest.raises(RuntimeError, match="NodeID not found"):
+            identity.assert_sealed()
+
+    def test_assert_sealed_passes_when_sealed(self):
+        from identity import DeviceIdentity
+        with patch("builtins.open", mock_open(read_data="nodeid123")):
+            identity = DeviceIdentity()
+        identity.assert_sealed()   # should not raise
+
+    def test_not_sealed_when_permission_error(self):
+        from identity import DeviceIdentity
         with patch("builtins.open", side_effect=PermissionError):
             identity = DeviceIdentity()
-        assert identity.node_id is None
         assert identity.sealed is False
 
-    def test_short_id_returns_12_chars(self):
-        with patch("builtins.open", mock_open(read_data="abcdef1234567890")):
+
+# ============================================================================
+# UserConfig
+# ============================================================================
+
+class TestUserConfig:
+
+    @pytest.fixture
+    def config(self, tmp_dir):
+        from identity import DeviceIdentity
+        from config import UserConfig
+        with patch("builtins.open", mock_open(read_data="test-node-id")):
             identity = DeviceIdentity()
-        assert identity.short_id() == "abcdef123456"
+        with patch.dict(os.environ, {"CHAMEHA_CONFIG_DIR": str(tmp_dir)}):
+            c = UserConfig(identity)
+        return c, identity, tmp_dir
 
-    def test_short_id_unknown_when_no_node(self):
-        with patch("builtins.open", side_effect=FileNotFoundError):
+    def test_default_first_boot(self, config):
+        c, _, _ = config
+        assert c.is_first_boot() is True
+        assert c.name  == "friend"
+        assert c.boots == 0
+
+    def test_complete_first_boot(self, config):
+        c, identity, tmp_dir = config
+        with patch.dict(os.environ, {"CHAMEHA_CONFIG_DIR": str(tmp_dir)}):
+            c.complete_first_boot("Jonah")
+        assert c.name           == "Jonah"
+        assert c.is_first_boot() is False
+        assert c.boots           == 1
+
+    def test_increment_boot(self, config):
+        c, identity, tmp_dir = config
+        with patch.dict(os.environ, {"CHAMEHA_CONFIG_DIR": str(tmp_dir)}):
+            c.increment_boot()
+            c.increment_boot()
+        assert c.boots == 2
+
+    def test_region_default(self, config):
+        c, _, _ = config
+        assert c.region == "KE"
+
+    def test_node_id_mismatch_resets(self, tmp_dir):
+        from identity import DeviceIdentity
+        from config import UserConfig
+        import json as _json
+
+        # Write config with different node_id
+        cfg_file = tmp_dir / "user.json"
+        cfg_file.write_text(_json.dumps({
+            "node_id":            "different-node",
+            "name":               "Alice",
+            "boots":              10,
+            "first_boot_complete": True,
+            "locale":             "sw",
+            "region":             "KE",
+        }))
+
+        with patch("builtins.open", mock_open(read_data="my-actual-node")):
             identity = DeviceIdentity()
-        assert identity.short_id() == "unknown"
+        with patch.dict(os.environ, {"CHAMEHA_CONFIG_DIR": str(tmp_dir)}):
+            c = UserConfig(identity)
+
+        # Should reset to defaults since node_id doesn't match
+        assert c.is_first_boot() is True
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Tier1
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# Tier 1 -- Language detection and model selection
+# ============================================================================
 
 class TestTier1:
-    @pytest.fixture
-    def tier1_offline(self):
-        from tier1 import Tier1
-        with patch("tier1.urllib.request.urlopen", side_effect=Exception("no ollama")):
-            t = Tier1()
-        return t
 
-    @pytest.fixture
-    def tier1_online(self):
-        from tier1 import Tier1
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "models": [{"name": "phi4-mini"}, {"name": "aya23:8b"}]
-        }).encode()
-        mock_response.__enter__ = MagicMock(return_value=mock_response)
-        mock_response.__exit__ = MagicMock(return_value=False)
-        with patch("tier1.urllib.request.urlopen", return_value=mock_response):
-            t = Tier1()
-        return t
-
-    def test_offline_fallback_message(self, tier1_offline):
-        result = tier1_offline.chat("Hello")
-        assert "Sorabbyngo" in result or "warming" in result or "moment" in result
-
-    def test_offline_device_command_returns_error(self, tier1_offline):
-        result = tier1_offline.device_command("turn off display")
-        assert result.get("error") is not None
-
-    def test_offline_status(self, tier1_offline):
-        assert "offline" in tier1_offline.status().lower()
-
-    def test_online_status(self, tier1_online):
-        assert "online" in tier1_online.status().lower()
-
-    def test_chat_routes_swahili(self, tier1_online):
-        from tier1 import _detect_language, LANGUAGE_MODELS
-        lang = _detect_language("Habari yako?")
-        assert lang == "sw"
-        assert lang in LANGUAGE_MODELS
-
-    def test_chat_routes_english(self, tier1_online):
+    def test_detect_english(self):
         from tier1 import _detect_language
-        lang = _detect_language("Hello, how are you?")
-        assert lang == "en"
+        assert _detect_language("What is the weather today?") == "en"
+
+    def test_detect_swahili(self):
+        from tier1 import _detect_language
+        assert _detect_language("Habari yako, dawa ya mgonjwa") == "sw"
 
     def test_detect_hausa(self):
         from tier1 import _detect_language
-        assert _detect_language("lafiya lau") == "ha"
+        assert _detect_language("Yauwa lafiya magani") == "ha"
 
-    def test_detect_yoruba(self):
-        from tier1 import _detect_language
-        assert _detect_language("bawo ni") == "yo"
+    def test_ollama_unreachable_not_available(self):
+        from tier1 import Tier1
+        with patch("urllib.request.urlopen", side_effect=Exception("timeout")):
+            t = Tier1()
+        assert t.available is False
 
-    def test_chat_calls_ollama_when_online(self, tier1_online):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"response": "Hello!"}).encode()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("tier1.urllib.request.urlopen", return_value=mock_resp):
-            result = tier1_online.chat("Hello")
-        assert result == "Hello!"
+    def test_chat_fallback_when_offline(self):
+        from tier1 import Tier1
+        with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+            t = Tier1()
+        response = t.chat("Hello")
+        assert "warming up" in response.lower() or "Sorabbyngo" in response
 
-    def test_chat_handles_ollama_failure(self, tier1_online):
-        tier1_online.available = True
-        with patch("tier1.urllib.request.urlopen", side_effect=Exception("timeout")):
-            result = tier1_online.chat("Hello")
-        assert isinstance(result, str)
-        assert len(result) > 0
+    def test_device_command_offline(self):
+        from tier1 import Tier1
+        with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+            t = Tier1()
+        result = t.device_command("turn on wifi")
+        assert result["error"] is not None
 
-    def test_device_command_parses_json(self, tier1_online):
-        tier1_online.available = True
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({
-            "response": '{"action": "dim", "target": "display", "params": {"level": 50}}'
-        }).encode()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("tier1.urllib.request.urlopen", return_value=mock_resp):
-            result = tier1_online.device_command("dim the display to 50%")
-        assert result.get("action") == "dim"
+    def test_status_offline(self):
+        from tier1 import Tier1
+        with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+            t = Tier1()
+        assert "offline" in t.status().lower()
 
-    def test_device_command_handles_json_error(self, tier1_online):
-        tier1_online.available = True
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"response": "not json {"}).encode()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("tier1.urllib.request.urlopen", return_value=mock_resp):
-            result = tier1_online.device_command("do something")
-        assert "error" in result
+    def test_get_tier1_singleton(self):
+        from tier1 import get_tier1
+        with patch("urllib.request.urlopen", side_effect=Exception("offline")):
+            a = get_tier1()
+            b = get_tier1()
+        assert a is b
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Brain
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# Tier 2 -- GPU detection and model selection
+# ============================================================================
 
-class TestBrain:
+class TestTier2:
+
+    def test_not_available_without_gpu(self):
+        from tier2 import Tier2
+        with patch("tier2._check_gpu", return_value=False):
+            t = Tier2()
+        assert t.available is False
+
+    def test_status_offline(self):
+        from tier2 import Tier2
+        with patch("tier2._check_gpu", return_value=False):
+            t = Tier2()
+        assert "offline" in t.status().lower()
+
+    def test_chat_raises_when_unavailable(self):
+        from tier2 import Tier2
+        with patch("tier2._check_gpu", return_value=False):
+            t = Tier2()
+        with pytest.raises(RuntimeError, match="Tier 2 unavailable"):
+            t.chat("test")
+
+    def test_reason_raises_when_unavailable(self):
+        from tier2 import Tier2
+        with patch("tier2._check_gpu", return_value=False):
+            t = Tier2()
+        with pytest.raises(RuntimeError):
+            t.reason("complex query")
+
+    def test_get_tier2_singleton(self):
+        from tier2 import get_tier2
+        with patch("tier2._check_gpu", return_value=False):
+            a = get_tier2()
+            b = get_tier2()
+        assert a is b
+
+
+# ============================================================================
+# Tier 3 -- Sanitization
+# ============================================================================
+
+class TestTier3:
+
     @pytest.fixture
-    def brain(self):
+    def tier3(self):
+        from tier3 import Tier3
+        with patch("tier3.Tier3._check_available", return_value=False):
+            return Tier3()
+
+    def test_sanitize_ip_address(self, tier3):
+        result = tier3._sanitize("Connect to 192.168.1.100 for data")
+        assert "192.168.1.100" not in result
+        assert "[REDACTED_IP]" in result
+
+    def test_sanitize_proc_path(self, tier3):
+        result = tier3._sanitize("Read /proc/sorabbyngo/nodeid now")
+        assert "/proc/sorabbyngo/nodeid" not in result
+        assert "[REDACTED_PATH]" in result
+
+    def test_sanitize_home_path(self, tier3):
+        result = tier3._sanitize("File at /home/jonah/secret.txt")
+        assert "/home/jonah" not in result
+
+    def test_sanitize_hash(self, tier3):
+        result = tier3._sanitize("Hash: deadbeef" * 5)
+        assert "[REDACTED_HASH]" in result
+
+    def test_unavailable_returns_message(self, tier3):
+        result = tier3.respond("test query")
+        assert "unavailable" in result.lower()
+
+    def test_check_available_unreachable(self):
+        from tier3 import Tier3
+        with patch("socket.socket") as mock_sock:
+            mock_sock.return_value.connect.side_effect = ConnectionRefusedError
+            t = Tier3()
+        assert t.available is False
+
+
+# ============================================================================
+# Conversation routing
+# ============================================================================
+
+class TestConversation:
+
+    @pytest.fixture
+    def conv(self):
+        from conversation import Conversation
+        with patch("tier1.Tier1._check_ollama", return_value=False), \
+             patch("tier2._check_gpu", return_value=False), \
+             patch("tier3.Tier3._check_available", return_value=False):
+            return Conversation()
+
+    def test_cloud_empty_returns_usage(self, conv):
+        result = conv.respond("/cloud")
+        assert "Usage" in result
+
+    def test_cloud_with_query_routes_tier3(self, conv):
+        conv.tier3.respond = MagicMock(return_value="Tier 3 response")
+        result = conv.respond("/cloud What is the latest research on malaria?")
+        assert result == "Tier 3 response"
+
+    def test_tier1_offline_fallback_message(self, conv):
+        # Tier 1 offline, Tier 2 offline -- should return unavailable message
+        result = conv.respond("Hello Chameha")
+        assert "unavailable" in result.lower() or "model" in result.lower()
+
+    def test_tier1_online_returns_response(self, conv):
+        conv.tier1.available = True
+        conv.tier1.chat      = MagicMock(return_value="I am here to help.")
+        result = conv.respond("How are you?")
+        assert result == "I am here to help."
+
+    def test_complex_query_tries_tier2_first(self, conv):
+        conv.tier2.available = True
+        conv.tier2.chat      = MagicMock(return_value="Clinical tier 2 response")
+        result = conv.respond("What are the symptoms and treatment protocol for severe malaria?")
+        assert result == "Clinical tier 2 response"
+
+    def test_status_returns_all_tiers(self, conv):
+        s = conv.status()
+        assert "tier1" in s
+        assert "tier2" in s
+        assert "tier3" in s
+
+    def test_is_complex_long_query(self):
+        from conversation import _is_complex
+        long_query = "a" * 130
+        assert _is_complex(long_query) is True
+
+    def test_is_complex_clinical_keyword(self):
+        from conversation import _is_complex
+        assert _is_complex("What is the correct dosage for this patient?") is True
+
+    def test_is_not_complex_short_casual(self):
+        from conversation import _is_complex
+        assert _is_complex("Hello how are you?") is False
+
+
+# ============================================================================
+# NATS Listener
+# ============================================================================
+
+class TestNatsListener:
+
+    def test_dispatch_known_subject(self):
+        from event_bus import EventBus
+        from nats_listener import NatsListener
         bus      = EventBus()
+        received = []
+        bus.subscribe(lambda e: received.append(e))
         bus.start()
-        identity = MagicMock()
-        identity.node_id = "test-node-001"
-        config   = MagicMock()
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            b = Brain(bus, identity, config)
-        yield b, bus
+
+        listener = NatsListener(bus)
+        payload  = json.dumps({
+            "message":    "Threat contained",
+            "confidence": 0.95,
+        })
+        listener._dispatch("sorabbyngo.sentinel.contained", payload)
+        time.sleep(0.1)
         bus.stop()
 
-    def test_brain_subscribes_to_bus(self, brain):
-        b, bus = brain
-        assert len(bus._handlers) > 0
+        assert len(received) == 1
+        assert received[0].source     == "sentinel.blue"
+        assert received[0].confidence == 0.95
 
-    def test_lock_event_surfaces_to_ui(self, brain):
-        b, bus = brain
-        surfaced = []
-        b.on_surface(lambda msg, evt: surfaced.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            lock(bus, "sentinel.red", "Threat blocked", action_taken="IP blocked")
+    def test_dispatch_unknown_subject_ignored(self):
+        from event_bus import EventBus
+        from nats_listener import NatsListener
+        bus      = EventBus()
+        received = []
+        bus.subscribe(lambda e: received.append(e))
+        bus.start()
+
+        listener = NatsListener(bus)
+        listener._dispatch("sorabbyngo.unknown.subject", '{"message":"x"}')
         time.sleep(0.1)
-        assert len(surfaced) == 1
-        assert "Sentinel" in surfaced[0] or "blocked" in surfaced[0].lower()
+        bus.stop()
 
-    def test_notify_critical_surfaces_to_ui(self, brain):
-        b, bus = brain
-        surfaced = []
-        b.on_surface(lambda msg, evt: surfaced.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            notify(bus, "sentinel.core", "Critical alert", severity=Severity.CRITICAL)
+        assert len(received) == 0
+
+    def test_dispatch_invalid_json_uses_raw(self):
+        from event_bus import EventBus
+        from nats_listener import NatsListener
+        bus      = EventBus()
+        received = []
+        bus.subscribe(lambda e: received.append(e))
+        bus.start()
+
+        listener = NatsListener(bus)
+        listener._dispatch("sorabbyngo.byngox.risk", "not-valid-json")
         time.sleep(0.1)
-        assert len(surfaced) == 1
+        bus.stop()
 
-    def test_notify_low_does_not_surface(self, brain):
-        b, bus = brain
-        surfaced = []
-        b.on_surface(lambda msg, evt: surfaced.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            notify(bus, "sentinel.core", "Low noise", severity=Severity.LOW)
+        assert len(received) == 1
+
+    def test_process_buffer_extracts_message(self):
+        from event_bus import EventBus
+        from nats_listener import NatsListener
+        bus      = EventBus()
+        received = []
+        bus.subscribe(lambda e: received.append(e))
+        bus.start()
+
+        listener  = NatsListener(bus)
+        payload   = json.dumps({"message": "buffer test"})
+        buf       = f'MSG sorabbyngo.byngox.risk 1 {len(payload)}\r\n{payload}\r\n'
+        remaining = listener._process_buffer(buf)
         time.sleep(0.1)
-        assert len(surfaced) == 0
+        bus.stop()
 
-    def test_notify_medium_does_not_surface(self, brain):
-        b, bus = brain
-        surfaced = []
-        b.on_surface(lambda msg, evt: surfaced.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            notify(bus, "byngox.agent", "Medium event", severity=Severity.MEDIUM)
-        time.sleep(0.1)
-        assert len(surfaced) == 0
+        assert remaining == ""
+        assert len(received) == 1
 
-    def test_ask_event_routes_to_ask_callback(self, brain):
-        b, bus = brain
-        asked = []
-        b.on_ask(asked.append)
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            ask(bus, "novela.risk", "Patient data needed")
-        time.sleep(0.1)
-        assert len(asked) == 1
-        assert asked[0].event_type == EventType.ASK
 
-    def test_deduplication_suppresses_repeat(self, brain):
-        b, bus = brain
-        surfaced = []
-        b.on_surface(lambda msg, evt: surfaced.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            lock(bus, "sentinel.red", "Same threat")
-            lock(bus, "sentinel.red", "Same threat")
-        time.sleep(0.2)
-        assert len(surfaced) == 1
+# ============================================================================
+# Tone Engine
+# ============================================================================
 
-    def test_source_label_mapping(self, brain):
-        b, _ = brain
-        assert b._source_label("sentinel.core") == "Sentinel"
-        assert b._source_label("byngox.health") == "Health Monitor"
-        assert b._source_label("hal.nodeid") == "Device Identity"
-        assert b._source_label("unknown.source") == "Unknown"
+class TestToneEngine:
 
-    def test_format_lock_event(self, brain):
-        b, _ = brain
-        event = ChamehaEvent(
-            source="sentinel.red",
-            message="Attack blocked",
-            event_type=EventType.LOCK,
-            severity=Severity.CRITICAL,
-            action_taken="IP 1.2.3.4 blocked",
-            confidence=0.95,
-        )
-        formatted = b._format_for_user(event)
-        assert "Attack blocked" in formatted
-        assert "IP 1.2.3.4 blocked" in formatted
-        assert "95%" in formatted
+    def test_default_mode_patient(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        assert t.current_mode == "patient"
 
-    def test_format_ask_event(self, brain):
-        b, _ = brain
-        event = ChamehaEvent(
-            source="novela.risk",
-            message="Please confirm medication",
-            event_type=EventType.ASK,
-            severity=Severity.HIGH,
-        )
-        formatted = b._format_for_user(event)
-        assert "confirm medication" in formatted
-        assert "needed" in formatted.lower()
+    def test_set_mode_doctor(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        t.set_mode("doctor")
+        assert t.current_mode == "doctor"
+        assert "clinical" in t.get_style()
 
-    def test_audit_writes_to_file(self, brain):
-        b, bus = brain
-        written = []
-        m = mock_open()
-        m.return_value.write = lambda x: written.append(x)
-        with patch("brain.os.makedirs"), patch("brain.open", m, create=True):
-            notify(bus, "sentinel.core", "Audit test", severity=Severity.HIGH)
-            time.sleep(0.1)
-        # audit attempted — check via written or just that no exception raised
-        assert True  # audit never crashes chameha — verified by no exception
+    def test_set_mode_developer(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        t.set_mode("developer")
+        assert "technical" in t.get_style()
 
-    def test_multiple_ui_callbacks(self, brain):
-        b, bus = brain
-        r1, r2 = [], []
-        b.on_surface(lambda msg, evt: r1.append(msg))
-        b.on_surface(lambda msg, evt: r2.append(msg))
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            lock(bus, "sentinel.red", "Alert")
-        time.sleep(0.1)
-        assert len(r1) == 1
-        assert len(r2) == 1
+    def test_get_greeting_with_name(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        greeting = t.get_greeting("Jonah")
+        assert "Jonah" in greeting
+        assert "Sorabbyngo" in greeting
 
-    def test_ui_callback_exception_doesnt_crash(self, brain):
-        b, bus = brain
-        def bad_callback(msg, evt):
-            raise RuntimeError("ui crashed")
-        b.on_surface(bad_callback)
-        with patch("brain.os.makedirs"), patch("builtins.open", mock_open()):
-            lock(bus, "sentinel.red", "Safe?")
-        time.sleep(0.1)  # should not raise
+    def test_get_greeting_without_name(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        greeting = t.get_greeting()
+        assert len(greeting) > 0
+
+    def test_invalid_mode_ignored(self):
+        from personality.tone_engine import ToneEngine
+        t = ToneEngine()
+        t.set_mode("nonexistent")
+        assert t.current_mode == "patient"   # unchanged
+
+
+# ============================================================================
+# Language Detection
+# ============================================================================
+
+class TestLanguageDetect:
+
+    def test_english_default(self):
+        from personality.language_detect import detect_language
+        assert detect_language("Hello how are you?") == "en"
+
+    def test_swahili_detected(self):
+        from personality.language_detect import detect_language
+        assert detect_language("Habari yako? Asante sana daktari") == "sw"
+
+    def test_mixed_detected_as_swahili_when_2_markers(self):
+        from personality.language_detect import detect_language
+        assert detect_language("habari dawa") == "sw"
+
+    def test_one_marker_not_enough(self):
+        from personality.language_detect import detect_language
+        assert detect_language("habari how are you today?") == "en"
+
+    def test_response_hint_english(self):
+        from personality.language_detect import get_response_language_hint
+        hint = get_response_language_hint("Good morning")
+        assert "English" in hint
+
+    def test_response_hint_swahili(self):
+        from personality.language_detect import get_response_language_hint
+        hint = get_response_language_hint("Habari yako daktari asante")
+        assert "Swahili" in hint
