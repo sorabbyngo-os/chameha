@@ -1,76 +1,100 @@
-# Chameha
-
-> **AI Personality and Interface Engine** — Sorabbyngo Labs
-
-The face of SORABBYNGO OS. Voice-first from boot. Warm, intelligent, bilingual
-English/Swahili. Inspired by the vision of AI as a calm, present companion.
-
-> Welcome, Charles. This is Sorabbyngo.
+<p align="center">
+  <img src="./assets/banner.svg" alt="Chameha" width="800"/>
+</p>
+<p align="center">
+  <strong>Chameha — AI Personality and Interface Engine</strong><br/>
+  The face of SORABBYNGO OS
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/voice-first-purple?style=flat-square"/>
+  <img src="https://img.shields.io/badge/languages-English%20%2B%20Swahili-purple?style=flat-square"/>
+  <img src="https://img.shields.io/badge/offline-first-darkviolet?style=flat-square"/>
+  <img src="https://img.shields.io/badge/CML-wired-purple?style=flat-square"/>
+</p>
 
 ---
 
-## Intelligence Architecture
+Chameha is the voice, face, and personality of SORABBYNGO OS. It boots directly to a voice shell — no lock screen, no launcher. The AI is the interface. Warm, intelligent, bilingual English/Swahili, and always offline-first.
 
-Chameha uses a tiered model stack — all inference is self-hosted or on-device.
-**No external API dependencies.**
+> *"Welcome. This is Sorabbyngo."*
 
-| Tier | Model | Runtime | Condition |
-|---|---|---|---|
-| Tier 1 | Phi-4 Mini | Ollama | Always-on, 1GB RAM |
-| Tier 1 | SmolLM2 360M | Ollama | Device control tasks |
-| Tier 1–2 | Aya 23 | Ollama | African language routing (Swahili, Hausa, Yoruba, Amharic) |
-| Tier 2 | Phi-4 INT8 / Gemma 3 4B | Ollama | GPU/NPU devices, 3–4GB RAM |
-| Tier 4 | DeepSeek-R1 70B | Byngox Prime vLLM | Self-hosted cluster, opt-in only |
+---
 
-**Tier 4 = Byngox Prime** — a privately operated H100/A100 inference cluster.
-It is not a third-party API. Patient data never leaves Sorabbyngo infrastructure.
+## Architecture
+
+```mermaid
+graph TD
+    USER["User input\nvoice · text · gesture"] --> BRAIN["Brain\nevent router · dedup · audit"]
+    BRAIN --> CONV["Conversation router"]
+    CONV -->|default| T1["Tier 1 — Phi-4 Mini\noffline · always on"]
+    CONV -->|complex| T2["Tier 2 — Qwen 2.5 7B\nlocal GPU"]
+    CONV -->|/cloud| T3["Tier 3 — Byngox Prime\nvLLM cluster"]
+    T1 --> CML["CML safety filter\nPII scrub · clinical guard"]
+    T2 --> CML
+    T3 --> CML
+    CML --> OUT["Response\nvoice · text · action"]
+    BRAIN --> BUS["Event bus\nOS events · alerts · NATS"]
+    BUS --> NATS["NATS mesh\nsorabbyngo.chameha.*"]
+```
 
 ---
 
 ## Components
 
-| Component | Technology | Status |
-|---|---|---|
-| UI Framework | Flutter cross-platform | In development |
-| Speech-to-Text | Whisper.cpp on-device | In development |
-| Text-to-Speech | Coqui TTS | In development |
-| Dialogue Manager | ACP protocol over NATS | In development |
-| Edge model | Phi-4 Mini (replaces Phi-3) | Planned Phase 4 |
-| African language NLP | Aya 23 (Cohere, open weights) | Planned Phase 4 |
-| Boot experience | Wayland compositor | In development |
-| Languages | English + Swahili + 13 African languages | Designed |
+| Module | Role |
+|---|---|
+| `brain.py` | Event router — dedup, audit, priority, UI callbacks |
+| `conversation.py` | Tier routing — T1 default, T3 `/cloud` only |
+| `tier1.py` | Phi-4 Mini + Aya 23 — offline, always on |
+| `tier2.py` | Qwen 2.5 7B — local GPU, complex queries |
+| `tier3.py` | Byngox Prime — vLLM cluster |
+| `personality/tone_engine.py` | Tone adaptation per context |
+| `personality/language_detect.py` | Swahili / Hausa / Yoruba detection |
+| `interfaces/voice_interface.py` | Whisper STT + Coqui TTS |
+| `interfaces/chat_interface.py` | Text shell |
+| `event_bus.py` | Threaded priority event bus |
+| `identity.py` | NodeID hardware seal |
+| `nats_listener.py` | Listens to OS security + health events |
 
 ---
 
-## Tier Routing
+## Tier routing
 
-```python
-# config: /etc/sorabbyngo/chameha.yaml
-chameha:
-  edge_model:           "phi4-mini"       # Always-on Tier 1
-  device_control_model: "smollm2:360m"    # Device control, JSON commands
-  dialogue_model:       "phi4-mini"       # Tier 1 conversation
-  language_model:       "aya23:8b"        # African language routing
+| Tier | Model | When | Latency |
+|---|:---:|---|---|
+| 1 | Phi-4 Mini · Aya 23 | Default — all queries | < 2s |
+| 2 | Qwen 2.5 7B | Complex reasoning | 3–8s |
+| 3 | DeepSeek-R1 70B | `/cloud <query>` explicit only | 8–30s |
 
-  language_routing:
-    swahili:  "aya23:8b"
-    hausa:    "aya23:8b"
-    yoruba:   "aya23:8b"
-    amharic:  "aya23:8b"
-    igbo:     "aya23:8b"
-    default:  "phi4-mini"
+---
 
-  # Tier 4 — Byngox Prime (self-hosted, opt-in only)
-  byngox_prime_url:   "http://byngox-prime.internal:8000/v1/chat/completions"
-  byngox_prime_model: "deepseek-r1:70b"
+## Quick start
+
+```bash
+# Monitor-only dev mode
+python3 main.py --mode=chat
+
+# Voice mode (requires Whisper + Coqui)
+python3 main.py --mode=voice
+
+# Run tests
+pytest tests/ -v
 ```
 
 ---
 
-## Boot Target
+## Part of SORABBYNGO OS
 
-< 10 seconds from power-on to "Welcome" on Tier 2 hardware.
+| Repo | Role |
+|---|---|
+| [byngox](https://github.com/sorabbyngo-Labs/byngox) | AI reasoning engine |
+| [cml](https://github.com/sorabbyngo-Labs/cml) | Safety and audit layer |
+| [byngonet](https://github.com/sorabbyngo-Labs/byngonet) | Mesh network |
+| [sorabbyngo-os](https://github.com/sorabbyngo-Labs/sorabbyngo-os) | Kernel |
 
 ---
 
-**Sorabbyngo Company** — Kisii, Kenya | 2026
+<p align="center">
+  <strong>Sorabbyngo Company</strong> &nbsp;·&nbsp; Kisii, Kenya &nbsp;·&nbsp; 2026<br/>
+  <em>Rhythm of Digital Life</em>
+</p>
