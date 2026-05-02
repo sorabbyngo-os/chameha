@@ -1,110 +1,105 @@
 """
-conversation.py -- Chameha conversation router (fixed v2)
-ADR-009 enforced: Tier 1 default, Tier 3 explicit /cloud only
-
-Fixes over v1:
-  - Tier 2 routing block was dead code (inside bare `if` with no condition)
-    Fixed: Tier 2 now properly tried for complex queries before Tier 1
-  - /cloud check refactored cleanly
+conversation.py — Tier router + Public/Personal Chameha mode resolver
+Public Chameha  -> existing T1/T2/T3 routing, shared personality
+Personal Chameha-> twin context injected, domain detection, T2 escalation
 """
-import datetime
-import os
-
-from tier1 import Tier1, _detect_language
+from __future__ import annotations
+import logging, re
+from identity import get_active_user_id, get_twin_session, TwinSessionInfo
+from twin_client import fetch_twin_context, push_interaction, TwinContext, TwinUnavailable
+from tier1 import Tier1
 from tier2 import Tier2
 from tier3 import Tier3
+from personality.tone_engine import PublicTone, PersonalTone
 
-LOG_PATH = os.path.expanduser("~/.sorabbyngo/chameha/chameha.log")
+log = logging.getLogger("chameha.conversation")
 
+HIGH_STAKES_DOMAINS = {"medical", "financial", "legal"}
+_CLOUD_PREFIX       = re.compile(r"^/cloud\s+", re.IGNORECASE)
+_COMPLEX_THRESHOLD  = 80
 
-def _log(entry: str):
-    ts = datetime.datetime.now().isoformat()
-    try:
-        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-        with open(LOG_PATH, "a") as f:
-            f.write(f"[{ts}] {entry}\n")
-    except Exception:
-        pass
+_MEDICAL_KW   = re.compile(r"\b(symptom|diagnos|medic|drug|dose|hospital|pain|ill|sick|treat|pressure|sugar|diabetes|prescri)\b", re.I)
+_FINANCIAL_KW = re.compile(r"\b(invest|portfolio|stock|fund|savings|loan|debt|mortgage|insurance|tax|pension|budget|afford)\b", re.I)
+_LEGAL_KW     = re.compile(r"\b(contract|lawsuit|legal|court|rights|clause|liability|attorney|lawyer|sue|compliance)\b", re.I)
 
+def _detect_domain(prompt: str) -> str:
+    if _MEDICAL_KW.search(prompt):   return "medical"
+    if _FINANCIAL_KW.search(prompt): return "financial"
+    if _LEGAL_KW.search(prompt):     return "legal"
+    return "general"
 
-# Queries longer than this or containing these keywords get Tier 2 first
-COMPLEX_KEYWORDS = {
-    "diagnose", "diagnosis", "treatment", "dosage", "medication",
-    "symptoms", "clinical", "patient", "risk", "drug interaction",
-    "protocol", "guideline", "differential",
-}
-
-
-def _is_complex(text: str) -> bool:
-    """Heuristic: long queries or clinical keywords go to Tier 2 first."""
-    lower = text.lower()
-    return len(text) > 120 or any(kw in lower for kw in COMPLEX_KEYWORDS)
+def _is_complex(prompt: str) -> bool:
+    words = len(prompt.split())
+    cues  = re.search(r"\b(explain|compare|analyse|why|how does|step[- ]by[- ]step|summarise)\b", prompt, re.I)
+    return words > _COMPLEX_THRESHOLD or bool(cues)
 
 
-class Conversation:
+class ConversationRouter:
     def __init__(self):
-        self.tier1 = Tier1()
-        self.tier2 = Tier2()
-        self.tier3 = Tier3()
+        self.t1 = Tier1()
+        self.t2 = Tier2()
+        self.t3 = Tier3()
 
-    def respond(self, user_input: str) -> str:
-        user_input = user_input.strip()
+    def handle(self, prompt: str, context: dict) -> str:
+        user_id = get_active_user_id()
+        session = get_twin_session(user_id) if user_id else None
+        if session:
+            log.debug("Personal Chameha mode — user %s", session.user_id)
+            return PersonalChameha(self.t1, self.t2, self.t3).handle(prompt, context, session)
+        log.debug("Public Chameha mode")
+        return PublicChameha(self.t1, self.t2, self.t3).handle(prompt, context)
 
-        # -- Tier 3: explicit /cloud command only (ADR-009) -------------------
-        if user_input.startswith("/cloud "):
-            query = user_input[7:].strip()
-            if not query:
-                return "Usage: /cloud <your question>"
-            _log(f"TIER3_REQUEST: {query[:80]}")
-            response = self.tier3.respond(query)
-            _log(f"TIER3_RESPONSE: {(response or '')[:80]}")
-            return response or "[No response from Tier 3]"
 
-        if user_input == "/cloud":
-            return "Usage: /cloud <your question>"
+class PublicChameha:
+    def __init__(self, t1, t2, t3):
+        self.t1, self.t2, self.t3 = t1, t2, t3
+        self.tone = PublicTone()
 
-        # -- Tier 2: complex queries when GPU available -----------------------
-        if self.tier2.available and _is_complex(user_input):
-            _log(f"TIER2_QUERY: {user_input[:80]}")
-            try:
-                lang     = _detect_language(user_input)
-                response = self.tier2.chat(user_input, language=lang)
-                if response:
-                    _log(f"TIER2_RESPONSE: {response[:80]}")
-                    return response
-            except Exception:
-                _log("TIER2_FAILED -- falling back to Tier 1")
+    def handle(self, prompt: str, context: dict) -> str:
+        system = self.tone.system_prompt()
+        if _CLOUD_PREFIX.match(prompt):
+            return self.t3.infer(_CLOUD_PREFIX.sub("", prompt), system)
+        if _is_complex(prompt):
+            return self.t2.infer(prompt, system)
+        return self.t1.infer(prompt, system)
 
-        # -- Tier 1: default, always offline ----------------------------------
-        _log(f"TIER1_QUERY: {user_input[:80]}")
-        response = self.tier1.chat(user_input)
-        if response:
-            _log(f"TIER1_RESPONSE: {response[:80]}")
-            return response
 
-        # -- Last resort: Tier 2 fallback when Tier 1 unavailable ------------
-        if self.tier2.available:
-            _log("TIER1_UNAVAILABLE -- trying Tier 2 as fallback")
-            try:
-                response = self.tier2.chat(user_input)
-                if response:
-                    return response
-            except Exception:
-                pass
+class PersonalChameha:
+    def __init__(self, t1, t2, t3):
+        self.t1, self.t2, self.t3 = t1, t2, t3
 
-        _log("ALL_LOCAL_UNAVAILABLE")
-        return (
-            "[Local model unavailable]\n"
-            "  Use /cloud <query> for external intelligence."
-        )
+    def handle(self, prompt: str, context: dict, session: TwinSessionInfo) -> str:
+        twin = fetch_twin_context(session.user_id)
+        if isinstance(twin, TwinUnavailable):
+            log.warning("Twin unavailable (%s) — falling back to public mode", twin.reason)
+            response = PublicChameha(self.t1, self.t2, self.t3).handle(prompt, context)
+            return response + f"\n\n[Chameha reduced mode — twin unavailable ({twin.reason})]"
 
-    def status(self) -> dict:
-        return {
-            "tier1": self.tier1.status(),
-            "tier2": self.tier2.status(),
-            "tier3": (
-                "active (Byngox Prime)"
-                if self.tier3.available
-                else "unavailable (Prime cluster unreachable)"
-            ),
-        }
+        domain = _detect_domain(prompt)
+        system = self._build_system(twin, domain)
+        response = self._route(prompt, system, domain)
+        push_interaction(session.user_id, "user",      prompt,   domain)
+        push_interaction(session.user_id, "assistant", response, domain)
+        return response
+
+    def _build_system(self, twin: TwinContext, domain: str) -> str:
+        base = PersonalTone(twin).system_prompt()
+        if domain in HIGH_STAKES_DOMAINS and domain in twin.safety_flags:
+            base += (
+                f"\n\nSAFETY OVERRIDE — domain={domain}: "
+                "Append a non-dismissable disclaimer: "
+                "'This is not professional medical/financial/legal advice. "
+                "Consult a qualified professional before acting on this.' "
+                "Flag this response for human review in the audit log."
+            )
+        return base
+
+    def _route(self, prompt: str, system: str, domain: str) -> str:
+        if domain in HIGH_STAKES_DOMAINS:
+            log.info("Personal -> Tier 2 (high-stakes: %s)", domain)
+            return self.t2.infer(prompt, system)
+        if _CLOUD_PREFIX.match(prompt):
+            return self.t3.infer(_CLOUD_PREFIX.sub("", prompt), system)
+        if _is_complex(prompt):
+            return self.t2.infer(prompt, system)
+        return self.t1.infer(prompt, system)

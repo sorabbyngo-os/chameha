@@ -1,129 +1,124 @@
 """
-nats_listener.py — Chameha NATS subscriber
-Listens to sorabbyngo.* subject hierarchy
-Translates raw NATS messages into ChamehaEvents
-Feeds them into the event bus
+nats_listener.py — NATS mesh listener
+Public:   sorabbyngo.chameha.public.*
+Personal: sorabbyngo.chameha.personal.{user_id}.*
+RULE: personal events NEVER touch the public bus.
 """
+from __future__ import annotations
+import asyncio, json, logging, os
+from typing import Callable, Awaitable
+import nats
+from nats.aio.client import Client as NATSClient
+from identity import get_node_id, get_active_user_id, get_twin_session
 
-import json
-import threading
-import time
-from event_bus import EventBus, ChamehaEvent, EventType, Severity
+log = logging.getLogger("chameha.nats_listener")
 
-# NATS subject → (source, event_type, severity) mapping
-SUBJECT_MAP = {
-    "sorabbyngo.sentinel.threat":    ("sentinel.core",  EventType.LOCK,   Severity.CRITICAL),
-    "sorabbyngo.sentinel.contained": ("sentinel.blue",  EventType.NOTIFY, Severity.LOW),
-    "sorabbyngo.sentinel.learned":   ("sentinel.brain", EventType.NOTIFY, Severity.LOW),
-    "sorabbyngo.byngox.risk":        ("byngox.health",  EventType.NOTIFY, Severity.HIGH),
-    "sorabbyngo.byngox.update":      ("byngox.agent",   EventType.NOTIFY, Severity.LOW),
-    "sorabbyngo.byngonet.mesh":      ("byngonet.mesh",  EventType.NOTIFY, Severity.MEDIUM),
-    "sorabbyngo.byngonet.trust":     ("byngonet.trust", EventType.NOTIFY, Severity.LOW),
-    "sorabbyngo.hal.sensors":        ("hal.sensors",    EventType.NOTIFY, Severity.LOW),
-    "sorabbyngo.novela.risk":        ("novela.risk",    EventType.NOTIFY, Severity.HIGH),
-}
+NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
+NODE_ID  = get_node_id()
 
-NATS_HOST = "127.0.0.1"
-NATS_PORT = 4222
+TOPIC_PUBLIC_OS       = "sorabbyngo.chameha.public.os"
+TOPIC_PUBLIC_HEALTH   = "sorabbyngo.chameha.public.health"
+TOPIC_PUBLIC_SECURITY = "sorabbyngo.chameha.public.security"
+TOPIC_PUBLIC_ANNOUNCE = "sorabbyngo.chameha.public.announce"
+
+def topic_personal(user_id: str, subtopic: str = "*") -> str:
+    return f"sorabbyngo.chameha.personal.{user_id}.{subtopic}"
+
+Handler = Callable[[dict], Awaitable[None]]
 
 
-class NatsListener:
-    def __init__(self, event_bus: EventBus):
-        self.bus      = event_bus
-        self._running = False
-        self._thread  = None
-        self._sock    = None
+class NATSListener:
+    def __init__(self):
+        self._nc: NATSClient | None = None
+        self._public_handlers:   list[tuple[str, Handler]] = []
+        self._personal_handlers: list[tuple[str, Handler]] = []
+        self._subs: list = []
 
-    def start(self):
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._connect_loop,
-            daemon=True,
-            name="chameha-nats-listener"
+    def on_public(self, topic: str, handler: Handler) -> None:
+        self._public_handlers.append((topic, handler))
+
+    def on_personal(self, subtopic: str, handler: Handler) -> None:
+        self._personal_handlers.append((subtopic, handler))
+
+    async def start(self) -> None:
+        self._nc = await nats.connect(
+            NATS_URL, name=f"chameha-{NODE_ID}",
+            error_cb=self._error_cb,
+            disconnected_cb=self._disconnected_cb,
+            reconnected_cb=self._reconnected_cb,
         )
-        self._thread.start()
+        log.info("NATS connected: %s (node %s)", NATS_URL, NODE_ID)
+        await self._subscribe_public()
+        await self._subscribe_personal()
 
-    def stop(self):
-        self._running = False
+    async def resubscribe_personal(self) -> None:
+        for sub in list(self._subs):
+            if hasattr(sub, "_subject") and "personal" in sub._subject:
+                await sub.drain()
+                self._subs.remove(sub)
+        await self._subscribe_personal()
 
-    # ------------------------------------------------------------------
-    # Connection loop — reconnects automatically if NATS is unavailable
-    # ------------------------------------------------------------------
+    async def stop(self) -> None:
+        if self._nc:
+            await self._nc.drain()
 
-    def _connect_loop(self):
-        while self._running:
+    async def publish_public(self, topic: str, payload: dict) -> None:
+        if not self._nc: return
+        await self._nc.publish(topic, json.dumps({**payload, "node_id": NODE_ID}).encode())
+
+    async def publish_personal(self, user_id: str, subtopic: str, payload: dict) -> None:
+        if not self._nc: return
+        topic = topic_personal(user_id, subtopic)
+        await self._nc.publish(topic, json.dumps({**payload, "user_id": user_id}).encode())
+        log.debug("personal publish -> %s", topic)
+
+    async def _subscribe_public(self) -> None:
+        for topic, handler in self._public_handlers:
+            sub = await self._nc.subscribe(topic, cb=self._make_cb(handler, "public"))
+            self._subs.append(sub)
+            log.info("public sub -> %s", topic)
+
+    async def _subscribe_personal(self) -> None:
+        user_id = get_active_user_id()
+        if not user_id: return
+        if not get_twin_session(user_id): return
+        for subtopic, handler in self._personal_handlers:
+            topic = topic_personal(user_id, subtopic)
+            sub   = await self._nc.subscribe(topic, cb=self._make_cb(handler, "personal"))
+            self._subs.append(sub)
+            log.info("personal sub -> %s (user %s)", topic, user_id)
+
+    @staticmethod
+    def _make_cb(handler: Handler, mode: str):
+        async def _cb(msg):
             try:
-                self._run()
-            except Exception:
-                # NATS not available — retry in 5s, Chameha keeps running
-                time.sleep(5)
+                payload = json.loads(msg.data.decode())
+                await handler(payload)
+            except json.JSONDecodeError:
+                log.warning("malformed NATS message on %s", msg.subject)
+            except Exception as e:
+                log.error("handler error on %s: %s", msg.subject, e)
+        return _cb
 
-    def _run(self):
-        import socket
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(2)
-        self._sock.connect((NATS_HOST, NATS_PORT))
-        self._sock.settimeout(None)
+    async def _error_cb(self, e):        log.error("NATS error: %s", e)
+    async def _disconnected_cb(self):    log.warning("NATS disconnected")
+    async def _reconnected_cb(self):
+        log.info("NATS reconnected — re-subscribing")
+        await self._subscribe_public()
+        await self._subscribe_personal()
 
-        # NATS protocol handshake
-        self._sock.recv(1024)  # INFO line
-        self._sock.sendall(b'CONNECT {"verbose":false,"pedantic":false}\r\n')
 
-        # Subscribe to all sorabbyngo subjects
-        for i, subject in enumerate(SUBJECT_MAP.keys()):
-            self._sock.sendall(
-                f'SUB {subject} {i}\r\n'.encode()
-            )
+async def handle_twin_updated(payload: dict) -> None:
+    user_id = payload.get("user_id")
+    if user_id:
+        from twin_client import invalidate_cache
+        invalidate_cache(user_id)
+        log.info("twin context cache invalidated for %s", user_id)
 
-        # Read messages
-        buf = ""
-        while self._running:
-            chunk = self._sock.recv(4096).decode("utf-8", errors="ignore")
-            if not chunk:
-                break
-            buf += chunk
-            buf = self._process_buffer(buf)
+async def handle_safety_flag(payload: dict) -> None:
+    log.warning("SAFETY FLAG — user=%s domain=%s confidence=%.2f response_id=%s",
+        payload.get("user_id"), payload.get("domain"),
+        payload.get("confidence", 0), payload.get("response_id"))
 
-    def _process_buffer(self, buf: str) -> str:
-        while "\r\n" in buf:
-            line, buf = buf.split("\r\n", 1)
-            if line.startswith("MSG "):
-                parts = line.split()
-                # NATS MSG format: MSG <subject> <sid> [reply] <#bytes>
-                if len(parts) == 4:
-                    subject  = parts[1]
-                    byte_len = int(parts[3])
-                elif len(parts) == 5:
-                    subject  = parts[1]
-                    byte_len = int(parts[4])
-                else:
-                    continue
-                if len(buf) >= byte_len:
-                    payload = buf[:byte_len]
-                    buf     = buf[byte_len:].lstrip("\r\n")
-                    self._dispatch(subject, payload)
-        return buf
-
-    def _dispatch(self, subject: str, payload: str):
-        mapping = SUBJECT_MAP.get(subject)
-        if not mapping:
-            return
-
-        source, event_type, severity = mapping
-
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            data = {"raw": payload}
-
-        event = ChamehaEvent(
-            source=source,
-            event_type=event_type,
-            severity=severity,
-            message=data.get("message", f"Event from {source}"),
-            action_taken=data.get("action_taken"),
-            confidence=data.get("confidence"),
-            payload=data
-        )
-
-        self.bus.publish(event)
+async def handle_session_expire(payload: dict) -> None:
+    log.info("session expire warning for %s", payload.get("user_id"))
