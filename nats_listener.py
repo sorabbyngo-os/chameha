@@ -122,3 +122,6 @@ async def handle_safety_flag(payload: dict) -> None:
 
 async def handle_session_expire(payload: dict) -> None:
     log.info("session expire warning for %s", payload.get("user_id"))
+
+# Alias for backwards compatibility
+NatsListener = NATSListener

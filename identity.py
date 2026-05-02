@@ -1,123 +1,167 @@
 """
-identity.py — Device identity + TwinSession management
-NodeID: hardware seal (unchanged)
-TwinSession: per-user auth binding for Personal Chameha (new)
+identity.py — Chameha OS identity layer
+Reads NodeID from kernel driver at /proc/sorabbyngo/nodeid
+Falls back to /etc/sorabbyngo/node_id or derives from hardware.
+Seals every Chameha session to this specific device.
 """
-from __future__ import annotations
-import hashlib, hmac, logging, os, time, uuid
-from dataclasses import dataclass, field
+import hashlib
+import logging
+import os
+import uuid
 from pathlib import Path
 from typing import Optional
 
-log = logging.getLogger("chameha.identity")
+log = logging.getLogger(__name__)
 
-_NODE_ID_PATH  = Path(os.getenv("NODE_ID_PATH", "/etc/sorabbyngo/node_id"))
+# Kernel driver path (sorabbyngo_nodeid.ko)
+NODE_ID_PATH = os.environ.get("NODE_ID_PATH", "/proc/sorabbyngo/nodeid")
+
+# Fallback — generated and cached on first boot
+def _get_fallback_path() -> Path:
+    return Path(os.environ.get("NODE_ID_FALLBACK_PATH",
+                os.path.expanduser("~/.sorabbyngo/nodeid")))
+
+_FALLBACK_PATH = _get_fallback_path()
+
 _node_id_cache: Optional[str] = None
 
-def get_node_id() -> str:
+
+def _read_node_id() -> Optional[str]:
+    """Read NodeID from kernel driver."""
+    path = os.environ.get("NODE_ID_PATH", NODE_ID_PATH)
+    try:
+        text = open(path).read().strip()
+        if text:
+            return text
+    except (FileNotFoundError, PermissionError):
+        pass
+    return None
+
+
+def _derive_node_id() -> str:
+    """Derive a stable NodeID from hardware when kernel module unavailable."""
     global _node_id_cache
     if _node_id_cache:
         return _node_id_cache
-    if _NODE_ID_PATH.exists():
-        _node_id_cache = _NODE_ID_PATH.read_text().strip()
-        return _node_id_cache
-    machine_id = _read_machine_id()
-    mac = _read_mac()
-    node_id = hashlib.sha256(f"{machine_id}:{mac}".encode()).hexdigest()[:24]
-    _NODE_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _NODE_ID_PATH.write_text(node_id)
-    log.info("NodeID generated: %s", node_id)
-    _node_id_cache = node_id
-    return node_id
 
-def _read_machine_id() -> str:
-    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
-        p = Path(path)
-        if p.exists():
-            return p.read_text().strip()
-    return str(uuid.getnode())
-
-def _read_mac() -> str:
+    # Try cached fallback first
     try:
-        import netifaces
-        for iface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(iface)
-            mac = addrs.get(netifaces.AF_LINK, [{}])[0].get("addr", "")
-            if mac and mac != "00:00:00:00:00:00":
-                return mac
-    except ImportError:
+        fb = _get_fallback_path()
+        if fb.exists():
+            nid = fb.read_text().strip()
+            if nid:
+                _node_id_cache = nid
+                return nid
+    except Exception:
         pass
-    return format(uuid.getnode(), "012x")
 
-_SESSION_SECRET = os.getenv("TWIN_SESSION_SECRET", get_node_id())
-_SESSION_TTL_S  = int(os.getenv("TWIN_SESSION_TTL_S", str(8 * 3600)))
-_active_sessions: dict[str, "_TwinSession"] = {}
-
-@dataclass
-class _TwinSession:
-    user_id:    str
-    twin_id:    str
-    token:      str
-    created_at: float = field(default_factory=time.time)
-    expires_at: float = field(default_factory=lambda: time.time() + _SESSION_TTL_S)
-
-    def is_valid(self) -> bool:
-        return time.time() < self.expires_at
-
-@dataclass
-class TwinSessionInfo:
-    user_id:    str
-    twin_id:    str
-    expires_at: float
-
-    @property
-    def display_ttl(self) -> str:
-        remaining = max(0, int(self.expires_at - time.time()))
-        h, m = divmod(remaining // 60, 60)
-        return f"{h}h {m}m remaining"
-
-def _sign_token(user_id: str, twin_id: str, created_at: float) -> str:
-    message = f"{get_node_id()}:{user_id}:{twin_id}:{created_at:.0f}"
-    return hmac.new(
-        _SESSION_SECRET.encode(),
-        message.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
-def create_twin_session(user_id: str, twin_id: str) -> TwinSessionInfo:
-    created_at = time.time()
-    token = _sign_token(user_id, twin_id, created_at)
-    session = _TwinSession(
-        user_id=user_id, twin_id=twin_id, token=token,
-        created_at=created_at, expires_at=created_at + _SESSION_TTL_S,
-    )
-    _active_sessions[user_id] = session
-    log.info("TwinSession created for user %s (twin %s)", user_id, twin_id)
-    return TwinSessionInfo(user_id=user_id, twin_id=twin_id, expires_at=session.expires_at)
-
-def get_twin_session(user_id: str) -> Optional[TwinSessionInfo]:
-    session = _active_sessions.get(user_id)
-    if not session:
-        return None
-    if not session.is_valid():
-        log.info("TwinSession expired for %s — dropping to public mode", user_id)
-        destroy_twin_session(user_id)
-        return None
-    return TwinSessionInfo(user_id=session.user_id, twin_id=session.twin_id, expires_at=session.expires_at)
-
-def destroy_twin_session(user_id: str) -> None:
-    if user_id in _active_sessions:
-        del _active_sessions[user_id]
+    # Derive from machine-id + MAC
+    machine_id = ""
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
         try:
-            from twin_client import invalidate_cache
-            invalidate_cache(user_id)
-        except ImportError:
+            machine_id = open(path).read().strip()
+            break
+        except Exception:
             pass
-        log.info("TwinSession destroyed for %s — returned to public mode", user_id)
+
+    mac = hex(uuid.getnode())
+    nid = hashlib.sha256(f"{machine_id}:{mac}".encode()).hexdigest()[:24]
+
+    # Cache to disk
+    try:
+        fb = _get_fallback_path()
+        fb.parent.mkdir(parents=True, exist_ok=True)
+        fb.write_text(nid)
+    except Exception:
+        pass
+
+    log.info("NodeID derived (dev mode): %s...", nid[:12])
+    _node_id_cache = nid
+    return nid
+
+
+class DeviceIdentity:
+    def __init__(self):
+        self.node_id = _read_node_id()
+        self.sealed  = self.node_id is not None
+        if not self.sealed:
+            # Dev/QEMU mode — derive from hardware
+            self.node_id = _derive_node_id()
+
+    def short_id(self) -> str:
+        """First 12 chars of NodeID for display."""
+        if self.node_id:
+            return self.node_id[:12]
+        return "unknown"
+
+    def assert_sealed(self):
+        """Call at boot — fails loud if kernel NodeID is missing."""
+        if not self.sealed:
+            raise RuntimeError(
+                "FATAL: NodeID not found at /proc/sorabbyngo/nodeid\n"
+                "Chameha cannot run without a sealed device identity.\n"
+                "Ensure the sorabbyngo kernel module is loaded."
+            )
+
+    def __repr__(self):
+        return f"DeviceIdentity(node_id={self.short_id()}..., sealed={self.sealed})"
+
+
+# ── Session management ────────────────────────────────────────────────────────
+
+import time as _time
+
+class TwinSessionInfo:
+    """Active user session bound to device NodeID."""
+    def __init__(self, user_id: str, twin_id: str, created_at: float = None):
+        self.user_id    = user_id
+        self.twin_id    = twin_id
+        self.created_at = created_at or _time.time()
+
+    def __repr__(self):
+        return f"TwinSessionInfo(user={self.user_id[:8]}..., twin={self.twin_id[:8]}...)"
+
+
+_active_user_id: Optional[str]        = None
+_twin_sessions:  dict                  = {}
+
+
+def get_node_id() -> str:
+    """Get device NodeID — reads from kernel driver or derives fallback."""
+    nid = _read_node_id()
+    if nid:
+        return nid
+    return _derive_node_id()
+
+
+def set_active_user(user_id: str):
+    """Set the currently active user (called at login)."""
+    global _active_user_id
+    _active_user_id = user_id
+    log.info("Active user set: %s...", user_id[:8] if user_id else "none")
+
 
 def get_active_user_id() -> Optional[str]:
-    for user_id, session in list(_active_sessions.items()):
-        if session.is_valid():
-            return user_id
-        destroy_twin_session(user_id)
-    return None
+    """Get the currently active user ID."""
+    return _active_user_id
+
+
+def create_twin_session(user_id: str, twin_id: str) -> TwinSessionInfo:
+    """Create a new twin session for a user."""
+    session = TwinSessionInfo(user_id=user_id, twin_id=twin_id)
+    _twin_sessions[user_id] = session
+    log.info("Twin session created: user=%s... twin=%s...", user_id[:8], twin_id[:8])
+    return session
+
+
+def get_twin_session(user_id: str) -> Optional[TwinSessionInfo]:
+    """Get active twin session for a user, or None."""
+    return _twin_sessions.get(user_id)
+
+
+def clear_session(user_id: str):
+    """Clear session on logout."""
+    global _active_user_id
+    _twin_sessions.pop(user_id, None)
+    if _active_user_id == user_id:
+        _active_user_id = None
