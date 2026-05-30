@@ -87,10 +87,10 @@ pytest tests/ -v
 
 | Repo | Role |
 |---|---|
-| [byngox](https://github.com/sorabbyngo-Labs/byngox) | AI reasoning engine |
-| [cml](https://github.com/sorabbyngo-Labs/cml) | Safety and audit layer |
-| [byngonet](https://github.com/sorabbyngo-Labs/byngonet) | Mesh network |
-| [sorabbyngo-os](https://github.com/sorabbyngo-Labs/sorabbyngo-os) | Kernel |
+| [byngox](https://github.com/sorabbyngo-os/byngox) | AI reasoning engine |
+| [cml](https://github.com/sorabbyngo-os/cml) | Safety and audit layer |
+| [byngonet](https://github.com/sorabbyngo-os/byngonet) | Mesh network |
+| [sorabbyngo-os](https://github.com/sorabbyngo-os/sorabbyngo-os) | Kernel |
 
 ---
 
