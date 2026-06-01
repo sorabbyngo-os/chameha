@@ -8,7 +8,7 @@ import os
 import sys
 import time
 
-from identity import DeviceIdentity
+from identity import DeviceIdentity, set_active_user, create_twin_session
 from config import UserConfig
 from event_bus import EventBus, Severity
 from brain import Brain
@@ -141,6 +141,28 @@ def main():
 
     # 3. Conversation router — Tier 1 + Tier 3
     conv = Conversation()
+
+    # 3b. Activate personal twin session using NodeID as user_id
+    #     This switches ConversationRouter into PersonalChameha mode
+    node_id = identity.node_id
+    set_active_user(node_id)
+    # Look up or create the personal twin via API
+    import requests as _req
+    try:
+        _r = _req.get(f"http://localhost:8741/v1/twin/{node_id}/context", timeout=2)
+        if _r.status_code == 404:
+            # First time — create personal twin
+            _cr = _req.post("http://localhost:8741/v1/twins",
+                json={"owner_id": node_id, "name": config.name,
+                      "type_name": "personal", "region": "KE"},
+                timeout=2)
+            twin_id = _cr.json().get("twin_id", node_id)
+        else:
+            twin_id = _r.json().get("twin_id", node_id)
+        create_twin_session(node_id, twin_id)
+        print(f"  Twin     : {twin_id[:16]}... [personal mode active]")
+    except Exception as _e:
+        print(f"  Twin     : unavailable ({_e}) — public mode")
 
     # 4. Event bus
     bus = EventBus()
