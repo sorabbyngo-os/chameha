@@ -149,16 +149,18 @@ def main():
     # Look up or create the personal twin via API
     import requests as _req
     try:
-        _r = _req.get(f"http://localhost:8741/v1/twin/{node_id}/context", timeout=2)
-        if _r.status_code == 404:
-            # First time — create personal twin
+        # Check by owner first — avoids creating duplicate twins on re-runs
+        _owned = _req.get(f"http://localhost:8741/v1/twins?owner={node_id}", timeout=2)
+        _owned_list = _owned.json() if _owned.status_code == 200 else []
+        personal = [t for t in _owned_list if t.get("twin_type") == "personal"]
+        if personal:
+            twin_id = personal[0]["twin_id"]
+        else:
             _cr = _req.post("http://localhost:8741/v1/twins",
                 json={"owner_id": node_id, "name": config.name,
                       "type_name": "personal", "region": "KE"},
                 timeout=2)
             twin_id = _cr.json().get("twin_id", node_id)
-        else:
-            twin_id = _r.json().get("twin_id", node_id)
         create_twin_session(node_id, twin_id)
         print(f"  Twin     : {twin_id[:16]}... [personal mode active]")
     except Exception as _e:
