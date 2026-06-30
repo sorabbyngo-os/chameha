@@ -1,0 +1,231 @@
+<p align="center">
+  <img src="./assets/banner.svg" alt="Chameha" width="900"/>
+</p>
+
+<p align="center">
+  <strong>Chameha — AI Personality, Interface & AION Execution Engine</strong><br/>
+  The user-facing intelligence of SORABBYNGO OS
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/AI-AION-purple?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Voice-English%20%2B%20Swahili-purple?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Offline-First-darkviolet?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Automation-Hardware%20Aware-purple?style=flat-square"/>
+  <img src="https://img.shields.io/badge/CML-Integrated-purple?style=flat-square"/>
+</p>
+
+---
+
+# Chameha
+
+Chameha is the **voice, personality, conversation engine, and execution interface** of **SORABBYNGO OS**.
+
+It is the first intelligence users interact with. Every request—whether spoken, typed, or triggered automatically—passes through Chameha.
+
+Chameha understands intent, maintains conversations, plans actions through **AION**, delegates reasoning to **Byngox**, communicates through **Byngonet**, and safely executes operations on the operating system.
+
+Unlike traditional voice assistants, Chameha is an operating system component rather than an application.
+
+---
+
+# Core Responsibilities
+
+- Voice interaction
+- Text interaction
+- Conversation management
+- Intent recognition
+- Natural language understanding
+- Personality and tone adaptation
+- Task planning
+- Automation
+- Hardware-aware execution
+- Remote device control
+- Memory integration
+- Secure capability-based execution
+
+---
+
+# System Architecture
+
+```text
+                    User
+                      │
+      Voice • Text • Touch • CLI
+                      │
+             Conversation Engine
+                      │
+               Intent Engine
+                      │
+                    AION
+      Planning • Scheduling • Execution
+                      │
+      ┌───────────────┼─────────────────┐
+      │               │                 │
+      ▼               ▼                 ▼
+   Byngox        Byngonet             HAL
+ Reasoning      Networking      Hardware Layer
+      │               │                 │
+      └───────────────┼─────────────────┘
+                      │
+          Capability Broker
+                      │
+              Linux System APIs
+                      │
+             Sorabbyngo Kernel
+AION
+
+AION is the autonomous execution engine built into Chameha.
+
+Responsibilities include:
+
+Intent planning
+Task decomposition
+Action graphs
+Scheduling
+Confirmation workflow
+Automation
+Execution monitoring
+Rollback
+Recovery
+Multi-device orchestration
+
+AION never communicates directly with users.
+
+Chameha owns all user interaction.
+
+Execution Flow
+User
+
+↓
+
+Conversation
+
+↓
+
+Intent Recognition
+
+↓
+
+AION Planner
+
+↓
+
+Capability Selection
+
+↓
+
+Hardware Profile
+
+↓
+
+Execution
+
+↓
+
+Monitoring
+
+↓
+
+Natural Language Response
+Repository Structure
+aion/
+    planner.py
+    executor.py
+    scheduler.py
+    action_graph.py
+    confirmation.py
+    policies.py
+
+brain/
+    dialogue_manager.py
+    context.py
+    intent_engine.py
+
+interfaces/
+    voice_interface.py
+    chat_interface.py
+
+personality/
+
+architecture/
+
+docs/
+
+tests/
+Hardware Awareness
+
+Before executing any task, Chameha requests a hardware profile from the Hardware Abstraction Layer (HAL).
+
+This enables intelligent decisions such as:
+
+selecting the appropriate AI model
+respecting memory limits
+monitoring battery level
+reducing workload during thermal events
+selecting CPU, GPU or NPU execution
+adapting to mobile and desktop devices automatically
+Remote Device Control
+
+Remote operations are executed through AION using capability-based permissions.
+
+Supported operations include:
+
+open applications
+launch workflows
+file management
+notification delivery
+screen control
+power management
+clipboard synchronization
+desktop automation
+mobile automation
+
+Every privileged action requires permission through the Capability Broker.
+
+Features
+Offline-first AI
+Voice-first interaction
+English and Swahili support
+Hardware-aware execution
+Secure automation
+Cross-device orchestration
+Modular architecture
+Kernel-integrated intelligence
+Capability-based security
+Multi-agent reasoning through Byngox
+Quick Start
+python3 main.py --mode chat
+
+python3 main.py --mode voice
+
+pytest tests/ -v
+Development Status
+
+Current phase:
+
+Core architecture
+AION architecture
+Conversation engine
+Execution engine
+Intent framework
+Hardware-aware execution
+Repository organization
+
+Upcoming:
+
+Planner implementation
+Executor implementation
+Scheduler
+Voice improvements
+Desktop integration
+Mobile integration
+Sorabbyngo Ecosystem
+Repository	Responsibility
+Sorabbyngo Base	Immutable operating system foundation
+Chameha	User interaction and orchestration
+Byngox	Specialized reasoning engine
+Byngonet	Networking and synchronization
+HAL	Hardware abstraction
+CML	Safety, policy and alignment
+<p align="center"> <strong>Sorabbyngo Company</strong><br/> <em>The Rhythm of Digital Life</em> </p> EOF ```
