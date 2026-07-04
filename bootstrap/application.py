@@ -16,7 +16,7 @@ class Chameha:
     def __init__(self):
 
         self.container = Container()
-
+        self.memory = self.container.memory
         self.pipeline = Pipeline()
 
     def start(self):

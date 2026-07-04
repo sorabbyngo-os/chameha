@@ -19,7 +19,7 @@ class Pipeline:
         self.dispatcher = Dispatcher()
 
         self.coordinator = Coordinator()
-
+        self.memory = None
     def execute(self, objective: str):
 
         plan = self.planner.create_plan(objective)
