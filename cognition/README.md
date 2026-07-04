@@ -195,6 +195,20 @@ Reflection
 Self Model
 ```
 
+Cognition
+    │
+    ▼
+Orchestration Kernel
+    │
+    ├── Internal reasoning
+    ├── Planning
+    ├── Reflection
+    ├── Personality
+    ├── Twin
+    ├── ACP / Byngox
+    └── External execution
+
+
 Together these form Chameha's cognitive architecture.
 
 ---
