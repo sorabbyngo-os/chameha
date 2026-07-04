@@ -206,3 +206,22 @@ Chameha provides language, conversation and interaction.
 The Twin provides cognition, memory, prediction and long-term intelligence.
 
 Together they create a continuously evolving cognitive system.
+
+
+The Digital Twin never executes decisions directly.
+
+Every simulation,
+prediction,
+decision,
+or execution request
+passes through the Chameha Orchestration Kernel.
+
+Twin
+   │
+Prediction
+Simulation
+Decision
+   │
+Orchestration Kernel
+   │
+Execution
